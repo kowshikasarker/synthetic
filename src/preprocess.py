@@ -29,6 +29,7 @@ def parse_args():
                         help="max percentage of missing values to keep microbiome or metabolome columns",
                         required=True, default=None)
     parser.add_argument("--imputation_method", type=str,
+                        choices=['knn'],
                         help="method to impute values",
                         required=True, default=None)
     parser.add_argument("--corr_method", type=str,
@@ -53,7 +54,7 @@ def parse_args():
     parser.add_argument("--train_pct", type=float,
                         help="percentage of sample for training data",
                         required=True, default=None)
-    #parser.add_argument("--val_pct", type=float,
+    parser.add_argument("--val_pct", type=float,
                         help="percentage of sample for validation data",
                         required=True, default=None)
     parser.add_argument("--out_dir", type=str,
@@ -68,9 +69,17 @@ def get_top_prior_edges(prior_path, node1_set, node2_set, prior_top_k, node1_pre
     df['Node1'] = node1_prefix + df['Node1'].astype(str)
     df['Node2'] = node2_prefix + df['Node2'].astype(str)
     df = df[(df['Node1'].isin(node1_set)) & (df['Node2'].isin(node2_set))]
+    
+    df = df.drop_duplicates()
+    print('df before adding rev_df', df.shape)
+    
     rev_df = df.copy()
     rev_df[['Node1', 'Node2']] = rev_df[['Node2', 'Node1']]
     df = pd.concat([df, rev_df], axis=0)
+    
+    df = df.drop_duplicates()
+    print('df after adding rev_df', df.shape)
+    
     df = df.sort_values(by='Weight', ascending=False)
     df = df.groupby('Node1').head(prior_top_k).reset_index(drop=True)
     df = df.drop(columns='Weight')
@@ -155,6 +164,7 @@ def get_correlation_edges(mic_df, met_df, corr_method, corr_top_k):
     top_corr = pd.DataFrame(np.sort(top_corr.to_numpy(), axis=1),
                             columns=top_corr.columns,
                             index=top_corr.index)
+    # the sorting is done so that duplicate edges like (Node1, Node2) and (Node2, Node1) become identical and later gets removed by drop_duplicates
     top_corr = top_corr.drop_duplicates()
     return top_corr
     
@@ -200,12 +210,12 @@ def normalize(df, train_df, val_df, test_df):
     scaler = scaler.fit(train_df.to_numpy())
     
     df = pd.DataFrame(scaler.transform(df.to_numpy()),
-                          columns=df.columns,
-                          index=df.index)
+                      columns=df.columns,
+                      index=df.index)
     
     train_df = pd.DataFrame(scaler.transform(train_df.to_numpy()),
-                          columns=train_df.columns,
-                          index=train_df.index)
+                            columns=train_df.columns,
+                            index=train_df.index)
     
     val_df = pd.DataFrame(scaler.transform(val_df.to_numpy()),
                           columns=val_df.columns,
@@ -220,7 +230,7 @@ def normalize(df, train_df, val_df, test_df):
 def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, imputation_method):
     valid_cols = set()
     for cohort in train_meta_df.columns:
-        cohort_samples = list((train_meta_df[train_meta_df[cohort] == 1]).index)
+        cohort_samples = list(train_meta_df[train_meta_df[cohort] == 1].index)
         print(len(cohort_samples), 'cohort_samples')
         cohort_train_df = train_df.loc[cohort_samples, :]
         print(cohort_train_df.shape, 'cohort_train_df')
@@ -241,30 +251,24 @@ def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, 
     df, train_df, val_df, test_df = normalize(df, train_df, val_df, test_df)
     
     return df, train_df, val_df, test_df
-
-#def preprocess(microbiome_path, metabolome_path, metadata_path, missing_pct, imputation_method, corr_method, corr_top_k, mic_mic_prior_path, met_met_prior_path, mic_met_prior_path, prior_top_k, train_pct):
     
 def preprocess(**kwargs):    
-    print('microbiome_path', kwargs['mic_path'])
     mic_df = pd.read_csv(kwargs['mic_path'], sep='\t', index_col='Sample')
     mic_df = mic_df.add_prefix('mic:')
     mic_df = mic_df.replace(0, np.nan)
     
-    print('metabolome_path', kwargs['met_path'])
     met_df = pd.read_csv(kwargs['met_path'], sep='\t', index_col='Sample')
     met_df = met_df.add_prefix('met:')
     met_df = met_df.replace(0, np.nan)
     
-    print('metadata_path', kwargs['meta_path'])
     meta_df = pd.read_csv(kwargs['meta_path'], sep='\t', index_col='Sample', usecols=['Sample', 'Study.Group'])
     meta_df = meta_df.rename(columns={'Study.Group': 'Cohort'})
+        
+    train_count = int(kwargs['train_pct'] * meta_df.shape[0])
+    val_count = int(kwargs['val_pct'] * meta_df.shape[0])
     
-    print('train_pct', kwargs['train_pct'])
-    #train_count = int(kwargs['train_pct'] * meta_df.shape[0])
-    #val_count = int(kwargs['val_pct'] * meta_df.shape[0])
-    
-    train_samples, test_samples, train_cohort, test_cohort = train_test_split(list(meta_df.index), list(meta_df.Cohort), train_size=kwargs['train_pct'], stratify=list(meta_df.Cohort))
-    val_samples, test_samples, val_cohort, test_cohort = train_test_split(test_samples, test_cohort, test_size=0.50, stratify=test_cohort)
+    train_samples, test_samples, train_cohort, test_cohort = train_test_split(list(meta_df.index), list(meta_df.Cohort), train_size=train_count, stratify=list(meta_df.Cohort))
+    val_samples, test_samples, val_cohort, test_cohort = train_test_split(test_samples, test_cohort, train_size=val_count, stratify=test_cohort)
     
     print(len(train_samples), 'train_samples', len(val_samples), 'val_samples', len(test_samples), 'test_samples')
     
@@ -292,10 +296,8 @@ def preprocess(**kwargs):
     test_meta_df = meta_df.loc[test_samples, :]
     
     
-    print('missing_pct', kwargs['missing_pct'], 'imputation_method', kwargs['imputation_method'])
     mic_df, train_mic_df, val_mic_df, test_mic_df = preprocess_input(mic_df, train_mic_df, val_mic_df, test_mic_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation_method'])
     met_df, train_met_df, val_met_df, test_met_df = preprocess_input(met_df, train_met_df, val_met_df, test_met_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation_method'])
-    
     
     mic_df.to_csv('preprocessed_microbiome.tsv', sep='\t', index=True)
     train_mic_df.to_csv('train_microbiome.tsv', sep='\t', index=True)
@@ -312,7 +314,6 @@ def preprocess(**kwargs):
     val_meta_df.to_csv('val_metadata.tsv', sep='\t', index=True)
     test_meta_df.to_csv('test_metadata.tsv', sep='\t', index=True)
     
-    print('corr_method', kwargs['corr_method'], 'corr_top_k', kwargs['corr_top_k'])
     corr_edges = get_correlation_edges(train_mic_df, train_met_df, kwargs['corr_method'], kwargs['corr_top_k'])
     corr_edges.to_csv('correlation_edges.tsv', sep='\t', index=False)
     
@@ -355,6 +356,7 @@ def preprocess(**kwargs):
     degree_stat(common_ntw)
     
 def main(args):
+    print('preprocess.py')
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
@@ -367,8 +369,6 @@ def main(args):
     sys.stderr = log_file
     
     print(args)
-    
-    #preprocess(args.microbiome_path, args.metabolome_path, args.metadata_path, args.missing_pct, args.imputation_method, args.corr_method, args.corr_top_k, args.mic_mic_prior_path, args.met_met_prior_path, args.mic_met_prior_path, args.prior_top_k, args.train_pct)
     
     kwargs = vars(args)
     del kwargs['out_dir']
