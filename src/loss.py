@@ -14,11 +14,12 @@ class KLLoss(torch.nn.Module):
     
 class BCELoss(torch.nn.Module):
     def __init__(self):
-        super(KLLoss, self).__init__()
+        super(BCELoss, self).__init__()
         
     def get_adjacency_matrix(self, num_nodes, edge_index):
         adj = torch.zeros(num_nodes, num_nodes)
         adj[edge_index[0, :], edge_index[1, :]] = 1
+        adj = adj.to(edge_index.device)
         # check if both direction edges are already included in the graphs
         return adj
     
@@ -26,6 +27,7 @@ class BCELoss(torch.nn.Module):
         edge_weight = adj.detach().clone()
         edge_weight[adj == 0] = 1 / (adj.numel() - adj.sum())
         edge_weight[adj == 1] = 1 / adj.sum()
+        edge_weight = edge_weight.to(adj.device)
         return edge_weight
     
     def forward(self, z, edge_index):
@@ -44,12 +46,11 @@ class MultiLossEarlyStopping(Callback):
         print('mode', mode)
         super().__init__()
         self.mode_dict = {"min": torch.lt, "max": torch.gt}
-        self.order_dict = {"min": "<", "max": ">"}
         self.monitor = monitor
         
         for m in mode:
             if m not in self.mode_dict:
-                raise MisconfigurationException(f"`mode` can be {','.join(self.mode_dict.keys())}, got {m}")
+                raise Exception("uncrecognized mode", m)
                 
         self.min_delta = dict(zip(monitor, min_delta))
         self.patience = dict(zip(monitor, patience))
@@ -72,7 +73,8 @@ class MultiLossEarlyStopping(Callback):
             if (monitor_val is None):
                 raise RuntimeError("Early stopping metric " + m + " absent in logs.")
                 return False
-            return True
+        return True
+    
     @override
     def on_validation_end(self, trainer, pl_module):
         logs = trainer.callback_metrics
@@ -88,6 +90,7 @@ class MultiLossEarlyStopping(Callback):
                 if self.wait_count[m] >= self.patience[m]:
                     print("Should stop for", m)
                     should_stop_count += 1
+        print("should_stop_count", should_stop_count)
         should_stop = should_stop_count == len(self.monitor)
         
         trainer.should_stop = trainer.should_stop or should_stop
