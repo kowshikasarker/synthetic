@@ -1,6 +1,4 @@
-# split dataset into train, val, test
-# preprocess train: discard columns with too many missing values, impute missing values, row normalize and column standardize
-# preprocess val and test: with the parameters obtained from train preprocessing
+# added subparsers
 
 import argparse
 import pandas as pd
@@ -11,7 +9,6 @@ from sklearn.impute import KNNImputer
 from sklearn.preprocessing import StandardScaler
 import numpy as np
 import networkx as nx
-from torch_geometric.data import HeteroData
 from sklearn.model_selection import train_test_split
 
 def parse_args():
@@ -25,32 +22,15 @@ def parse_args():
     parser.add_argument("--meta_path", type=str,
                         help="path to the metadata data in .tsv format",
                         required=True, default=None)
+    
     parser.add_argument("--missing_pct", type=float,
                         help="max percentage of missing values to keep microbiome or metabolome columns",
                         required=True, default=None)
-    parser.add_argument("--imputation_method", type=str,
+    parser.add_argument("--imputation", type=str,
                         choices=['knn'],
                         help="method to impute values",
                         required=True, default=None)
-    parser.add_argument("--corr_method", type=str,
-                        choices=['spearman', 'pearson'],
-                        help="correlation method to consider in the correlation network",
-                        required=True, default=None)
-    parser.add_argument("--corr_top_k", type=int,
-                        help="top k edges to consider in the correlation network",
-                        required=True, default=None)
-    parser.add_argument("--mic_mic_prior_path", type=str,
-                        help="path to microbiome-microbiome prior edges in .tsv format",
-                        required=True, default=None)
-    parser.add_argument("--met_met_prior_path", type=str,
-                        help="path to metabolome-metabolome prior edges in .tsv format",
-                        required=True, default=None)
-    parser.add_argument("--mic_met_prior_path", type=str,
-                        help="path to microbiome-metabolome prior edges in .tsv format",
-                        required=True, default=None)
-    parser.add_argument("--prior_top_k", type=int,
-                        help="top k edges to consider in the prior network",
-                        required=True, default=None)
+    
     parser.add_argument("--train_pct", type=float,
                         help="percentage of sample for training data",
                         required=True, default=None)
@@ -60,15 +40,48 @@ def parse_args():
     parser.add_argument("--out_dir", type=str,
                         help="path to the output dir",
                         required=True, default=None)
+    
+    parser.add_argument('--corr', action=argparse.BooleanOptionalAction,
+                       required=True, default=None)
+    parser.add_argument("--corr_method", type=str, choices=['spearman', 'pearson'],
+                        help="correlation method to contruct the correlation network",
+                        required=False, default='spearman')
+    parser.add_argument("--corr_top_k", type=int,
+                        help="top k edges to consider in the correlation network",
+                        required=False, default=None)
+    
+    parser.add_argument('--prior', action=argparse.BooleanOptionalAction,
+                       required=True, default=None)
+    parser.add_argument("--mic_mic_prior_path", type=str,
+                        help="path to microbiome-microbiome prior edges in .tsv format",
+                        required=False, default=None)
+    parser.add_argument("--met_met_prior_path", type=str,
+                        help="path to metabolome-metabolome prior edges in .tsv format",
+                        required=False, default=None)
+    parser.add_argument("--mic_met_prior_path", type=str,
+                        help="path to microbiome-metabolome prior edges in .tsv format",
+                        required=False, default=None)
+    parser.add_argument("--prior_top_k", type=int,
+                        help="top k edges to consider in the prior network",
+                        required=False, default=None)
     args = parser.parse_args()
     return args
 
 def get_top_prior_edges(prior_path, node1_set, node2_set, prior_top_k, node1_prefix, node2_prefix):
+    print(node1_prefix, node2_prefix)
+    print('node1_set', node1_set)
+    print('node2_set', node2_set)
+    
     df = pd.read_csv(prior_path, sep='\t')
+    print(df.head())
     df.columns = ['Node1', 'Node2', 'Weight']
     df['Node1'] = node1_prefix + df['Node1'].astype(str)
     df['Node2'] = node2_prefix + df['Node2'].astype(str)
+    print('before filtering', df.shape)
     df = df[(df['Node1'].isin(node1_set)) & (df['Node2'].isin(node2_set))]
+    edge_nodes = set(df['Node1']).union(set(df['Node2']))
+    print('after filtering', df.shape)
+    print('edge_nodes', len(edge_nodes))
     
     df = df.drop_duplicates()
     print('df before adding rev_df', df.shape)
@@ -81,8 +94,12 @@ def get_top_prior_edges(prior_path, node1_set, node2_set, prior_top_k, node1_pre
     print('df after adding rev_df', df.shape)
     
     df = df.sort_values(by='Weight', ascending=False)
+    print(df.head())
+    print(df.groupby('Node1'))
     df = df.groupby('Node1').head(prior_top_k).reset_index(drop=True)
+    print('after ranking', df.shape)
     df = df.drop(columns='Weight')
+    print('after ranking', df.shape)
     df = pd.DataFrame(np.sort(df.to_numpy(), axis=1),
                             columns=df.columns,
                             index=df.index)
@@ -97,9 +114,9 @@ def get_prior_edges(mic_mic_prior_path, met_met_prior_path, mic_met_prior_path, 
     mic_met_edges = get_top_prior_edges(mic_met_prior_path, mic_set, met_set, prior_top_k, 'mic:', 'met:')
     
     print('mic_mic_edges', mic_mic_edges.shape, 'met_met_edges', met_met_edges.shape, 'mic_met_edges', mic_met_edges.shape)
-    print('mic_mic_edges', mic_mic_edges[mic_mic_edges.Node1 == mic_mic_edges.Node2])
-    print('met_met_edges', met_met_edges[met_met_edges.Node1 == met_met_edges.Node2])
-    print('mic_met_edges', mic_met_edges[mic_met_edges.Node1 == mic_met_edges.Node2])
+    #print('mic_mic_edges', mic_mic_edges[mic_mic_edges.Node1 == mic_mic_edges.Node2])
+    #print('met_met_edges', met_met_edges[met_met_edges.Node1 == met_met_edges.Node2])
+    #print('mic_met_edges', mic_met_edges[mic_met_edges.Node1 == mic_met_edges.Node2])
     prior_edges = pd.concat([mic_mic_edges, met_met_edges, mic_met_edges], axis=0)
     prior_edges = pd.DataFrame(np.sort(prior_edges.to_numpy(), axis=1),
                             columns=prior_edges.columns,
@@ -136,7 +153,7 @@ def get_correlation_edges(mic_df, met_df, corr_method, corr_top_k):
     print('met_mic_corr', met_mic_corr.shape)
     
     def get_rowwise_top_columns(df, top_k):
-        top_cols = ['Top-'+str(i) for i in range(1, top_k+1)]
+        top_cols = ['Top-' + str(i) for i in range(1, top_k+1)]
         print('df.shape', df.shape)
         df = pd.DataFrame(df.apply(lambda x: x.nlargest(top_k).index.astype(str).tolist(), axis=1).tolist(), 
                                columns=top_cols, index=df.index)
@@ -196,8 +213,8 @@ def knn_impute(df, train_df, val_df, test_df):
     
     return df, train_df, val_df, test_df
 
-def impute(df, train_df, val_df, test_df, imputation_method):
-    if(imputation_method == 'knn'):
+def impute(df, train_df, val_df, test_df, imputation):
+    if(imputation == 'knn'):
         return knn_impute(df, train_df, val_df, test_df)    
     
 def normalize(df, train_df, val_df, test_df):
@@ -227,7 +244,7 @@ def normalize(df, train_df, val_df, test_df):
     
     return df, train_df, val_df, test_df
 
-def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, imputation_method):
+def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, imputation):
     valid_cols = set()
     for cohort in train_meta_df.columns:
         cohort_samples = list(train_meta_df[train_meta_df[cohort] == 1].index)
@@ -247,21 +264,27 @@ def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, 
     val_df = val_df[valid_cols]
     test_df = test_df[valid_cols]
     
-    df, train_df, val_df, test_df = impute(df, train_df, val_df, test_df, imputation_method)
+    df, train_df, val_df, test_df = impute(df, train_df, val_df, test_df, imputation)
     df, train_df, val_df, test_df = normalize(df, train_df, val_df, test_df)
     
     return df, train_df, val_df, test_df
     
-def preprocess(**kwargs):    
+def preprocess(**kwargs):
     mic_df = pd.read_csv(kwargs['mic_path'], sep='\t', index_col='Sample')
-    mic_df = mic_df.add_prefix('mic:')
+    mic_df.index = mic_df.index.map(str)
+    mic_df = mic_df.add_prefix('sample:', axis=0)
+    mic_df = mic_df.add_prefix('mic:', axis=1)
     mic_df = mic_df.replace(0, np.nan)
     
     met_df = pd.read_csv(kwargs['met_path'], sep='\t', index_col='Sample')
-    met_df = met_df.add_prefix('met:')
+    met_df.index = met_df.index.map(str)
+    met_df = met_df.add_prefix('sample:', axis=0)
+    met_df = met_df.add_prefix('met:', axis=1)
     met_df = met_df.replace(0, np.nan)
     
     meta_df = pd.read_csv(kwargs['meta_path'], sep='\t', index_col='Sample', usecols=['Sample', 'Study.Group'])
+    meta_df.index = meta_df.index.map(str)
+    meta_df = meta_df.add_prefix('sample:', axis=0)
     meta_df = meta_df.rename(columns={'Study.Group': 'Cohort'})
         
     train_count = int(kwargs['train_pct'] * meta_df.shape[0])
@@ -296,8 +319,8 @@ def preprocess(**kwargs):
     test_meta_df = meta_df.loc[test_samples, :]
     
     
-    mic_df, train_mic_df, val_mic_df, test_mic_df = preprocess_input(mic_df, train_mic_df, val_mic_df, test_mic_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation_method'])
-    met_df, train_met_df, val_met_df, test_met_df = preprocess_input(met_df, train_met_df, val_met_df, test_met_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation_method'])
+    mic_df, train_mic_df, val_mic_df, test_mic_df = preprocess_input(mic_df, train_mic_df, val_mic_df, test_mic_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation'])
+    met_df, train_met_df, val_met_df, test_met_df = preprocess_input(met_df, train_met_df, val_met_df, test_met_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation'])
     
     mic_df.to_csv('preprocessed_microbiome.tsv', sep='\t', index=True)
     train_mic_df.to_csv('train_microbiome.tsv', sep='\t', index=True)
@@ -314,28 +337,35 @@ def preprocess(**kwargs):
     val_meta_df.to_csv('val_metadata.tsv', sep='\t', index=True)
     test_meta_df.to_csv('test_metadata.tsv', sep='\t', index=True)
     
-    corr_edges = get_correlation_edges(train_mic_df, train_met_df, kwargs['corr_method'], kwargs['corr_top_k'])
-    corr_edges.to_csv('correlation_edges.tsv', sep='\t', index=False)
+    edges = []
     
-    print('corr_edges duplicates')
-    print(corr_edges[corr_edges.Node1 == corr_edges.Node2])
+    if (kwargs['corr']):
+        corr_edges = get_correlation_edges(train_mic_df, train_met_df, kwargs['corr_method'], kwargs['corr_top_k'])
+        edges.append(corr_edges)
+        corr_edges.to_csv('correlation_edges.tsv', sep='\t', index=False)
     
-    mic_set = set(train_mic_df.columns.astype(str))
-    met_set = set(train_met_df.columns.astype(str))
+        print('corr_edges duplicates')
+        print(corr_edges[corr_edges.Node1 == corr_edges.Node2])
+
+    if (kwargs['prior']):
+        mic_set = set(train_mic_df.columns.astype(str))
+        met_set = set(train_met_df.columns.astype(str))
+
+        print('mic_mic_prior_path', kwargs['mic_mic_prior_path'])
+        print('met_met_prior_path', kwargs['met_met_prior_path'])
+        print('mic_met_prior_path', kwargs['mic_met_prior_path'])
+        prior_edges = get_prior_edges(kwargs['mic_mic_prior_path'], kwargs['met_met_prior_path'], kwargs['mic_met_prior_path'], mic_set, met_set, kwargs['prior_top_k'])
+        edges.append(prior_edges)
+        prior_edges.to_csv('prior_edges.tsv', sep='\t', index=False)
+
+        print('prior_edges duplicates')
+        print(prior_edges[prior_edges.Node1 == prior_edges.Node2])
     
-    print('mic_mic_prior_path', kwargs['mic_mic_prior_path'])
-    print('met_met_prior_path', kwargs['met_met_prior_path'])
-    print('mic_met_prior_path', kwargs['mic_met_prior_path'])
-    prior_edges = get_prior_edges(kwargs['mic_mic_prior_path'], kwargs['met_met_prior_path'], kwargs['mic_met_prior_path'], mic_set, met_set, kwargs['prior_top_k'])
-    prior_edges.to_csv('prior_edges.tsv', sep='\t', index=False)
-    
-    print('prior_edges duplicates')
-    print(prior_edges[prior_edges.Node1 == prior_edges.Node2])
-    
-    edges = pd.concat([corr_edges, prior_edges], axis=0)
+    edges = pd.concat(edges, axis=0)
     edges = edges.drop_duplicates()
     edges.to_csv('edges.tsv', sep='\t', index=False)
     
+    '''
     corr_ntw = nx.from_pandas_edgelist(corr_edges, source='Node1', target='Node2')
     prior_ntw = nx.from_pandas_edgelist(prior_edges, source='Node1', target='Node2')
     common_ntw = nx.intersection(corr_ntw, prior_ntw)
@@ -353,14 +383,31 @@ def preprocess(**kwargs):
     print('Common network')
     print(common_ntw.number_of_nodes(), 'Nodes', common_ntw.number_of_edges(), 'Edges', nx.number_of_isolates(common_ntw), 'isolates')
     common_ntw.remove_nodes_from(list(nx.isolates(common_ntw)))
-    degree_stat(common_ntw)
+    degree_stat(common_ntw)'''
+    
+def check_corr_prior_args(kwargs):
+    if (kwargs['corr']):
+        if kwargs['corr_method'] is None:
+            raise Exception('corr_method is required with --corr')
+        if kwargs['corr_top_k'] is None:
+            raise Exception('corr_top_k is required with --corr')    
+        
+    if (kwargs['prior']):
+        if kwargs['mic_mic_prior_path'] is None:
+            raise Exception('mic_mic_prior_path is required with --prior')
+        if kwargs['met_met_prior_path'] is None:
+            raise Exception('met_met_prior_path is required with --prior')
+        if kwargs['mic_met_prior_path'] is None:
+            raise Exception('mic_met_prior_path is required with --prior')
+        if kwargs['prior_top_k'] is None:
+            raise Exception('prior_top_k is required with --prior')
     
 def main(args):
     print('preprocess.py')
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
-    log_file = open(args.out_dir + '/preprocessing.log', 'w')
+    log_file = open(args.out_dir + '/preprocess.log', 'w')
     
     original_stdout = sys.stdout
     sys.stdout = log_file
@@ -371,6 +418,7 @@ def main(args):
     print(args)
     
     kwargs = vars(args)
+    check_corr_prior_args(kwargs)
     del kwargs['out_dir']
     preprocess(**kwargs)
 
