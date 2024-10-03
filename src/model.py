@@ -1,9 +1,9 @@
 import torch
 from torch_geometric.nn import GCNConv
 
-class SeparateHiddenEncoder(torch.nn.Module):
+class CombinedHiddenEncoder(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, latent_dim, self_loop):
-        super(SeparateHiddenEncoder, self).__init__()
+        super(CombinedHiddenEncoder, self).__init__()
         self.conv = GCNConv(input_dim, hidden_dim, add_self_loops=self_loop) # self_loop -> true/false
         self.mean = GCNConv(hidden_dim, latent_dim, add_self_loops=self_loop)
         self.logvar = GCNConv(hidden_dim, latent_dim, add_self_loops=self_loop)
@@ -18,9 +18,9 @@ class SeparateHiddenEncoder(torch.nn.Module):
         z = noise * torch.exp(0.5 * logvar) + mean # check eqn
         return z, mean, logvar
 
-class SeparateHiddenDecoder(torch.nn.Module):
+class CombinedHiddenDecoder(torch.nn.Module):
     def __init__(self, input_dim, hidden_dim, output_dim, self_loop):
-        super(SeparateHiddenDecoder, self).__init__()
+        super(CombinedHiddenDecoder, self).__init__()
         self.conv1 = GCNConv(input_dim, hidden_dim, add_self_loops=self_loop)
         self.conv2 = GCNConv(hidden_dim, output_dim, add_self_loops=self_loop)
 
@@ -29,12 +29,12 @@ class SeparateHiddenDecoder(torch.nn.Module):
         out = self.conv2(h, edge_index)
         return out
 
-class SeparateHiddenModel(torch.nn.Module):
+class CombinedHiddenModel(torch.nn.Module):
     def __init__(self, feature_dim, condition_dim, hidden_dim, latent_dim, self_loop):
-        super(SeparateHiddenModel, self).__init__()
+        super(CombinedHiddenModel, self).__init__()
         self.latent_dim = latent_dim
-        self.encoder = SeparateHiddenEncoder(feature_dim + condition_dim, hidden_dim, latent_dim, self_loop)
-        self.decoder = SeparateHiddenDecoder(latent_dim + condition_dim, hidden_dim, feature_dim, self_loop)
+        self.encoder = CombinedHiddenEncoder(feature_dim + condition_dim, hidden_dim, latent_dim, self_loop)
+        self.decoder = CombinedHiddenDecoder(latent_dim + condition_dim, hidden_dim, feature_dim, self_loop)
         
     def forward(self, feature, condition, edge_index):
         x = torch.concat([feature, condition], dim=1)
@@ -51,9 +51,9 @@ class SeparateHiddenModel(torch.nn.Module):
         return z, out
     
 
-class CombinedHiddenEncoder(torch.nn.Module):
+class SeparateHiddenEncoder(torch.nn.Module):
     def __init__(self, feature_dim, condition_dim, hidden_dim, latent_dim, self_loop):
-        super(CombinedHiddenEncoder, self).__init__()
+        super(SeparateHiddenEncoder, self).__init__()
         self.conv1 = GCNConv(feature_dim, hidden_dim, add_self_loops=self_loop) # self_loop -> true/false
         self.conv2 = GCNConv(condition_dim, hidden_dim, add_self_loops=self_loop)
         self.conv3 = GCNConv(2*hidden_dim, hidden_dim, add_self_loops=self_loop)
@@ -61,6 +61,7 @@ class CombinedHiddenEncoder(torch.nn.Module):
         self.logvar = GCNConv(hidden_dim, latent_dim, add_self_loops=self_loop)
 
     def forward(self, feature, condition, edge_index):
+        print('SeparateHiddenEncoder', 'edge_index', edge_index.dtype)
         f2h = self.conv1(feature, edge_index)
         c2h = self.conv2(condition, edge_index)
         h = torch.concat([f2h, c2h], dim=1)
@@ -72,9 +73,9 @@ class CombinedHiddenEncoder(torch.nn.Module):
         z = noise * torch.exp(0.5 * logvar) + mean # check eqn
         return z, mean, logvar
 
-class CombinedHiddenDecoder(torch.nn.Module):
+class SeparateHiddenDecoder(torch.nn.Module):
     def __init__(self, latent_dim, condition_dim, hidden_dim, output_dim, self_loop):
-        super(CombinedHiddenDecoder, self).__init__()
+        super(SeparateHiddenDecoder, self).__init__()
         self.conv1 = GCNConv(latent_dim, hidden_dim, add_self_loops=self_loop)
         self.conv2 = GCNConv(condition_dim, hidden_dim, add_self_loops=self_loop)
         self.conv3 = GCNConv(2*hidden_dim, hidden_dim, add_self_loops=self_loop)
@@ -88,12 +89,12 @@ class CombinedHiddenDecoder(torch.nn.Module):
         out = self.conv4(h, edge_index)
         return out
 
-class CombinedHiddenModel(torch.nn.Module):
+class SeparateHiddenModel(torch.nn.Module):
     def __init__(self, feature_dim, condition_dim, hidden_dim, latent_dim, self_loop):
-        super(CombinedHiddenModel, self).__init__()
+        super(SeparateHiddenModel, self).__init__()
         self.latent_dim = latent_dim
-        self.encoder = CombinedHiddenEncoder(feature_dim, condition_dim, hidden_dim, latent_dim, self_loop)
-        self.decoder = CombinedHiddenDecoder(latent_dim, condition_dim, hidden_dim, feature_dim, self_loop)
+        self.encoder = SeparateHiddenEncoder(feature_dim, condition_dim, hidden_dim, latent_dim, self_loop)
+        self.decoder = SeparateHiddenDecoder(latent_dim, condition_dim, hidden_dim, feature_dim, self_loop)
         
     def forward(self, feature, condition, edge_index):
         z, mean, logvar = self.encoder(feature, condition, edge_index)
@@ -103,9 +104,7 @@ class CombinedHiddenModel(torch.nn.Module):
     def sample(self, condition, edge_index):
         z = torch.randn(condition.shape[0], self.latent_dim)
         z = z.to(condition.device)
-        x = torch.concat([z, condition], dim=1)
-        print('x', x.shape)
-        out = self.decoder(x, edge_index)
+        out = self.decoder(z, condition, edge_index)
         return z, out
     
 class UnconditionalEncoder(torch.nn.Module):
@@ -152,5 +151,3 @@ class UnconditionalModel(torch.nn.Module):
         z = z.to(edge_index.device)
         out = self.decoder(z, edge_index)
         return z, out
-        
-    
