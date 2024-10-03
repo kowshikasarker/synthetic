@@ -31,18 +31,20 @@ def parse_args():
     parser.add_argument("--train_met_path", type=str,
                         help="path to the train metabolome data in .tsv format",
                         required=True, default=None)
+    parser.add_argument("--train_meta_path", type=str,
+                        help="path to the train metadata data in .tsv format",
+                        required=True, default=None)
+    
     parser.add_argument("--val_mic_path", type=str,
                         help="path to the validation micriobiome data in .tsv format",
                         required=True, default=None)
     parser.add_argument("--val_met_path", type=str,
                         help="path to the validation metabolome data in .tsv format",
                         required=True, default=None)
-    parser.add_argument("--train_meta_path", type=str,
-                        help="path to the train metadata data in .tsv format",
-                        required=True, default=None)
     parser.add_argument("--val_meta_path", type=str,
                         help="path to the validation metadata data in .tsv format",
                         required=True, default=None)
+    
     parser.add_argument("--edge_path", type=str,
                         help="path to the edges in .tsv formnat",
                         required=True, default=None)
@@ -51,15 +53,16 @@ def parse_args():
                         help="name of the synthetic data generation model",
                         required=True, default=None)
     parser.add_argument("--syn_sample_count", type=int,
-                        help="Count of synthetic samples to generate",
+                        help="count of synthetic samples to generate",
                         required=True, default=None)
+    
     parser.add_argument("--optim_loss", type=str, nargs="+",
                         choices=['kl', 'mse', 'bce'],
                         help="Losses to use for optimizing model parameters",
                         required=True, default=None)
     parser.add_argument("--hparam_loss", type=str,
                         choices=['kl', 'mse', 'bce'],
-                        help="Loss to use for tuning hyperparameters",
+                        help="loss to use for tuning hyperparameters",
                         required=True, default=None)
     parser.add_argument("--out_dir", type=str,
                         help="path to output dir",
@@ -79,6 +82,7 @@ class MicrobiomeMetabolomeDataset(Dataset):
     def processed_file_names(self):
         condition_df = pd.read_csv(self.raw_dir + '/condition.tsv', sep='\t', index_col='Sample')
         return [sample + '.pt' for sample in condition_df.index]
+        #return [str(sample) + '.pt' for sample in condition_df.index]
 
     def process(self):
         print("process")
@@ -92,6 +96,8 @@ class MicrobiomeMetabolomeDataset(Dataset):
         print('feature_df', feature_df.shape, len(set(feature_df.columns)))
         
         condition_df = pd.read_csv(self.raw_dir + '/condition.tsv', sep='\t', index_col='Sample')
+        #condition_df.index = condition_df.index.astype(str)
+        print('condition_df.index', condition_df.index.dtype)
         cohort_pct = np.sum(condition_df.to_numpy(), axis=0)
         cohort_pct = cohort_pct / np.sum(cohort_pct)
         
@@ -101,9 +107,14 @@ class MicrobiomeMetabolomeDataset(Dataset):
         
         nodes = list(feature_df.columns)
         num_nodes = len(nodes)
-        node_id = dict(zip(nodes, list(range(len(nodes)))))
+        nid = list(range(len(nodes)))
+        node_id = dict(zip(nodes, nid))
         with open(self.processed_dir + '/node_id.json', 'w') as fp:
             json.dump(node_id, fp)
+            
+        feature_df = feature_df.rename(columns=node_id)
+        feature_df = feature_df[nid]
+        print('feature_df', feature_df.shape)
         
         edge_df = edge_df[(edge_df.Node1.isin(nodes)) & (edge_df.Node2.isin(nodes))]
         print('edge_df after filtering', edge_df.shape)
@@ -116,33 +127,41 @@ class MicrobiomeMetabolomeDataset(Dataset):
         self.samples = list(condition_df.index)
         self.length = len(self.samples)
         self.cohort_pct = cohort_pct
-        self.feature_names = list(feature_df.columns)
+        self.feature_names = nodes
         self.microbiome_names = list(microbiome_df.columns)
         self.metabolome_names = list(metabolome_df.columns)
         self.cohort_names = list(condition_df.columns)
-        self.graph_edges = torch.from_numpy(edge_index).int()
+        self.graph_edges = torch.from_numpy(edge_index).long()
         
         for sample in self.samples:
+            print(sample)
             data = Data()
             data.num_nodes = num_nodes
             feature = feature_df.loc[sample, :].to_numpy()
             feature = feature.reshape((-1, 1))
+            print('feature', feature.shape)
             data.feature = torch.from_numpy(feature).float()
             
             condition = condition_df.loc[sample, :].to_numpy()
             condition = np.tile(condition, (feature.shape[0], 1))
             data.condition = torch.from_numpy(condition).float()
             
-            data.edge_index = torch.from_numpy(edge_index).int()
+            data.edge_index = torch.from_numpy(edge_index).long()
             data.sample = sample
+            #data.sample = str(sample)
+            print('directed edge_index', edge_index.shape)
             data = ToUndirected()(data)
+            print('undirected edge_index', edge_index.shape)
             torch.save(data, self.processed_dir + '/' + sample + '.pt')
+            #torch.save(data, self.processed_dir + '/' + str(sample) + '.pt')
             
     def len(self):
         return len(self.samples)
 
     def get(self, idx):
         return torch.load(self.processed_dir + '/' + self.samples[idx] + '.pt')
+
+        #return torch.load(self.processed_dir + '/' + str(self.samples[idx]) + '.pt')
     
 def create_pyg_dataset(dataset_dir, microbiome_path, metabolome_path, metadata_path, edge_path):
     raw_dir = dataset_dir + '/raw'
@@ -150,7 +169,7 @@ def create_pyg_dataset(dataset_dir, microbiome_path, metabolome_path, metadata_p
     
     processed_dir = dataset_dir + '/processed'
     if(os.path.exists(processed_dir)):
-            rmtree(processed_dir)
+        rmtree(processed_dir, ignore_errors=True)
     
     copyfile(microbiome_path, raw_dir + '/microbiome.tsv')
     copyfile(metabolome_path, raw_dir + '/metabolome.tsv')
@@ -164,6 +183,7 @@ def create_pyg_dataset(dataset_dir, microbiome_path, metabolome_path, metadata_p
 class Synthesizer(pl.LightningModule):
     def __init__(self, model_name, feature_dim, condition_dim, hidden_dim, latent_dim, optim_loss, lr, self_loop):
         super(Synthesizer, self).__init__()
+        self.save_hyperparameters()
         model_map = {
             'separate_hidden': SeparateHiddenModel,
             'combined_hidden': CombinedHiddenModel,
@@ -171,11 +191,11 @@ class Synthesizer(pl.LightningModule):
         }
         loss_map = {
             'kl': KLLoss,
-            'mse': F.mse_loss,
+            'mse': torch.nn.MSELoss,
             'bce': BCELoss
         }
-        self.save_hyperparameters()
         self.model = model_map[model_name](feature_dim, condition_dim, hidden_dim, latent_dim, self_loop)
+        print('self.model', self.model)
         self.feature_dim = feature_dim
         self.condition_dim = condition_dim
         self.hidden_dim = hidden_dim
@@ -184,6 +204,7 @@ class Synthesizer(pl.LightningModule):
         self.lr = lr
         self.self_loop = self_loop
         self.loss_modules = {loss: loss_map[loss]() for loss in optim_loss}
+        print('self.loss_modules', self.loss_modules)
         
     def sample_data(self, cohort_pct, sample_count, graph_edges, feature_count):
         assert graph_edges.max() == feature_count - 1
@@ -191,6 +212,7 @@ class Synthesizer(pl.LightningModule):
         for i in range(sample_count):
             edge_index.append(torch.add(graph_edges, feature_count))
         edge_index = torch.cat(edge_index, dim=1)
+        print('graph_edges', graph_edges.shape, 'sample_count', sample_count, 'edge_index', edge_index.shape)
         
         cohort_count = np.ceil(np.multiply(cohort_pct, sample_count)).astype(int)
         cohort = np.zeros(shape=(sample_count, cohort_count.size))
@@ -201,7 +223,7 @@ class Synthesizer(pl.LightningModule):
         cohort = np.repeat(cohort, feature_count, axis=0)
         condition = torch.from_numpy(cohort).float()
         condition = condition.to(self.device)
-        edge_index = edge_index.to(self.device).int()
+        edge_index = edge_index.to(self.device).long()
         z, samples = self.model.sample(condition, edge_index)
         return condition, z, samples
     
@@ -210,24 +232,25 @@ class Synthesizer(pl.LightningModule):
         condition = condition.to(self.device)
         edge_index = edge_index.to(self.device)
         print('feature', feature.shape, 'condition', condition.shape, 'edge_index', edge_index.shape)
+        print('feature', feature.dtype, 'condition', condition.dtype, 'edge_index', edge_index.dtype)
         return self.model(feature, condition, edge_index)
     
     def configure_optimizers(self):
         optimizer = Adam(self.parameters(), lr=self.lr)
         return optimizer
     
-    def calc_loss(pred_feat, true_feat, mean, logvar, z, edge_index):
+    def calc_loss(self, pred_feat, true_feat, mean, logvar, z, edge_index):
         loss_dict = {}
         loss = 0
         if ('kl' in self.optim_loss):
-            loss_dict['kl'] = self.loss_modules['kl'](mean, logvar)
-            loss += loss_dict['kl']
+            loss_dict['kl_loss'] = self.loss_modules['kl'](mean, logvar)
+            loss = loss_dict['kl_loss'] + loss
         if ('mse' in self.optim_loss):
-            loss_dict['mse'] = self.loss_modules['mse'](pred_feat, true_feat)
-            loss += loss_dict['mse']
+            loss_dict['mse_loss'] = self.loss_modules['mse'](pred_feat, true_feat)
+            loss = loss_dict['mse_loss'] + loss
         if ('bce' in self.optim_loss):
-            loss_dict['bce'] = self.loss_modules['bce'](z, edge_index)
-            loss += loss_dict['mse']
+            loss_dict['bce_loss'] = self.loss_modules['bce'](z, edge_index)
+            loss = loss_dict['bce_loss'] + loss
         loss_dict['loss'] = loss
         return loss_dict
             
@@ -237,7 +260,7 @@ class Synthesizer(pl.LightningModule):
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
         loss_dict = self.calc_loss(out, batch.feature, mean, logvar, z, batch.edge_index)
         for loss_name, loss_value in loss_dict.items():
-            self.log('train_'+ loss_name + '_loss', loss_value.item(),
+            self.log('train_'+ loss_name, loss_value.item(),
                     on_step=False, on_epoch=True)
         return loss_dict['loss']
     
@@ -246,10 +269,12 @@ class Synthesizer(pl.LightningModule):
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
         loss_dict = self.calc_loss(out, batch.feature, mean, logvar, z, batch.edge_index)
         for loss_name, loss_value in loss_dict.items():
-            self.log('val_'+ loss_name + '_loss', loss_value.item(),
+            self.log('val_'+ loss_name, loss_value.item(),
                     on_step=False, on_epoch=True)
         return loss_dict['loss']
+    
     def predict_step(self, batch, batch_idx, dataloader_idx):
+        print('predict_step')
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
         return batch.sample, out
     
@@ -308,7 +333,7 @@ def generate_synthetic_data(train_mic_path,
     
     hidden_dim = [2, 4, 8]
     lr = [1e-1, 1e-3, 1e-5, 1e-7]
-    self_loop = [True, False]
+    self_loop = [False, True]
     patience = [1, 3, 5]
     
     hparam_label = ['hparam-'+str(i) for i in range(len(hidden_dim)*len(lr)*len(self_loop)*len(patience))]
@@ -327,6 +352,7 @@ def generate_synthetic_data(train_mic_path,
     for i in range(len(hparam_label)):
         hparam_no = hparam_label[i]
         hparam = hparams[i]
+        print(hparam_no, hparam)
         
         if(os.path.exists(hparam_no)):
             shutil.rmtree(hparam_no)
@@ -356,7 +382,7 @@ def generate_synthetic_data(train_mic_path,
                              callbacks=[early_stopping,
                                         checkpoint_callback],
                              log_every_n_steps=1,
-                             accelerator="gpu",
+                             accelerator="cuda",
                              devices=1,
                              enable_checkpointing=True,
                              logger=[csv_logger],
@@ -402,6 +428,7 @@ def generate_synthetic_data(train_mic_path,
         samples = []
         for dataloader_idx in range(len(predicted)):
             for batch_idx in range(len(predicted[dataloader_idx])):
+                print(predicted[dataloader_idx][batch_idx][0])
                 samples = samples + predicted[dataloader_idx][batch_idx][0]
                 out.append(predicted[dataloader_idx][batch_idx][1])
                 
@@ -421,7 +448,7 @@ def generate_synthetic_data(train_mic_path,
         best_model.eval()
         
         condition, z, out = best_model.sample_data(train_set.cohort_pct, syn_sample_count, train_set.graph_edges, feature_count)
-        samples = ['sample-'+str(i) for i in range(1, sample_count+1)]
+        samples = ['sample-'+str(i) for i in range(1, syn_sample_count+1)]
         condition = condition.cpu().detach().numpy()
         condition = condition[::feature_count]
         condition_df = pd.DataFrame(condition,
@@ -453,6 +480,7 @@ def generate_synthetic_data(train_mic_path,
         met_df.to_csv('synthetic_metabolome.tsv', sep='\t', index=True)
         
         os.chdir('..')
+        print('\n')
     hparam_df.to_csv(csv_log_dir + '/hyperparameters.tsv', sep='\t', index=True)
     best_hparam = hparam_df[hparam_loss].idxmin()
     with open(csv_log_dir + '/best_hparam.txt', 'w') as fp:
