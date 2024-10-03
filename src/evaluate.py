@@ -1,12 +1,18 @@
 import argparse
 from scipy.stats import kstest, spearmanr, f_oneway
-from sklearn.ensemble import RandomForestClassifier, MLPClassifier, GradientBoostingClassifier
-from neighbors import KNeighborsClassifier, NearestNeighbors
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.neural_network import MLPClassifier
+from sklearn.neighbors import KNeighborsClassifier, NearestNeighbors
 from sklearn.naive_bayes import GaussianNB
 from sklearn.metrics import roc_auc_score, average_precision_score, adjusted_rand_score, silhouette_score
 from sklearn.model_selection import train_test_split
 from sklearn.cluster import KMeans
 import random
+from sklearn.utils import shuffle
+from pathlib import Path
+import os, sys
+import pandas as pd
+import numpy as np
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -19,6 +25,7 @@ def parse_args():
     parser.add_argument("--train_meta_path", type=str,
                         help="path to the train metadata data in .tsv format",
                         required=True, default=None)
+    
     parser.add_argument("--test_mic_path", type=str,
                         help="path to the test micriobiome data in .tsv format",
                         required=True, default=None)
@@ -28,6 +35,7 @@ def parse_args():
     parser.add_argument("--test_meta_path", type=str,
                         help="path to the test metadata data in .tsv format",
                         required=True, default=None)
+    
     parser.add_argument("--syn_mic_path", type=str,
                         help="path to the synthetic micriobiome data in .tsv format",
                         required=True, default=None)
@@ -37,13 +45,14 @@ def parse_args():
     parser.add_argument("--syn_meta_path", type=str,
                         help="path to the synthetic metadata data in .tsv format",
                         required=True, default=None)
+    
     parser.add_argument("--out_dir", type=str,
                         help="path to output dir",
                         required=True, default=None)
     args = parser.parse_args()
     return args
 
-def mean_std_corr(exp_df, syn_df, out_dir):
+def evaluate_mean_std_corr(exp_df, syn_df, out_dir):
     exp_mean = exp_df.mean(axis=0)
     exp_std = exp_df.std(axis=0)
     
@@ -57,54 +66,82 @@ def mean_std_corr(exp_df, syn_df, out_dir):
     std_corr = spearmanr(exp_std, syn_std)
     
     df = pd.concat([exp_mean, syn_mean, exp_std, syn_std])
+    print('df', df.shape)
     df.columns = ['exp_mean', 'syn_mean', 'exp_std', 'syn_std']
     df.to_csv(out_dir + '/mean_std.tsv', sep='\t', index=True)
     
-    mean_corr = exp_mean.corr(syn_mean, method='spearman')
-    std_corr = exp_std.corr(syn_std, method='spearman')
+    #mean_corr = exp_mean.corr(syn_mean, method='spearman')
+    #std_corr = exp_std.corr(syn_std, method='spearman')
     
-    with open('mean_std_corr.tsv', 'w') as fp:
+    mean_corr = spearmanr(exp_mean, syn_mean)
+    std_corr = spearmanr(exp_std, syn_std)
+    
+    with open(out_dir + '/mean_std_corr.tsv', 'w') as fp:
         fp.write('aggr' + '\t' + 'statistic' + '\t' + 'p-value'+ '\n')
         fp.write('mean' + '\t' + str(mean_corr[0]) + '\t' + str(mean_corr[1]) + '\n')
         fp.write('std' + '\t' + str(std_corr[0]) + '\t' + str(std_corr[1]))
         
 
-def classifier(model, train_x, test_x, train_y, test_y):
+def evaluate_classifier(model, train_x, test_x, train_y, test_y):
+    binary = True
+    if ((len(set(train_y))) > 2):
+        binary = False
     model = model.fit(train_x, train_y) 
     y_pred = model.predict_proba(test_x)
-    auroc = roc_auc_score(test_y, y_pred)
-    auprc = average_precision_score(test_y, y_pred)
-    return auroc, auprc
+    if(binary):
+        auroc = roc_auc_score(test_y, y_pred[:, 1])
+        auprc = average_precision_score(test_y, y_pred[:, 1])
+        return auroc, auprc
+    else:
+        auroc = roc_auc_score(test_y, y_pred, multi_class='ovr')
+        auprc = average_precision_score(test_y, y_pred, average='weighted')
+        return auroc, auprc
 
-def discriminative_score(exp_df, syn_df, out_dir):
+def evaluate_discriminative_score(exp_df, syn_df, out_dir):
     train_pct = 0.60
     exp_train_count = int(exp_df.shape[0] * train_pct)
     syn_train_count = int(syn_df.shape[0] * train_pct)
+    
+    print('exp_train_count', exp_train_count,
+          'syn_train_count', syn_train_count)
     
     # shuffle
     exp_df = exp_df.sample(frac=1)
     syn_df = syn_df.sample(frac=1)
     
-    exp_train = exp_df[:exp_train_count, :]
-    exp_test = exp_df[exp_train_count:, :]
+    exp_train = exp_df.iloc[:exp_train_count, :]
+    exp_test = exp_df.iloc[exp_train_count:, :]
     
-    syn_train = syn_df[:syn_train_count, :]
-    syn_test = syn_df[syn_train_count:, :]
+    syn_train = syn_df.iloc[:syn_train_count, :]
+    syn_test = syn_df.iloc[syn_train_count:, :]
     
     train_df = pd.concat([exp_train, syn_train], axis=0)
     test_df = pd.concat([exp_test, syn_test], axis=0)
     
     train_x = train_df.to_numpy()
-    train_x = train_df.to_numpy()
+    test_x = test_df.to_numpy()
     
-    print('exp_train', exp_train.shape, 'exp_test', exp_test.shape, 'train_df', train_df.shape)
-    print('syn_train', syn_train.shape, 'syn_test', syn_test.shape, 'test_df', test_df.shape)
+    train_y = np.array([1] * exp_train.shape[0] + [0] * syn_train.shape[0])
+    test_y = np.array([1] * exp_test.shape[0] + [0] * syn_test.shape[0])
+    
+    train_x, train_y = shuffle(train_x, train_y)
+    test_x, test_y = shuffle(test_x, test_y)
+    
+    print('exp_train', exp_train.shape,
+          'syn_train', syn_train.shape,
+          'train_df', train_df.shape,
+          'train_y', train_y.shape)
+    
+    print('exp_test', exp_test.shape,
+          'syn_test', syn_test.shape,
+          'test_df', test_df.shape,
+          'test_y', test_y.shape)
     
     records = []
     
     # random forest
     model = RandomForestClassifier(max_depth=None)
-    auroc, auprc = classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
     records.append({
         'model': 'rf',
         'auroc': auroc,
@@ -112,8 +149,8 @@ def discriminative_score(exp_df, syn_df, out_dir):
     })
     
     # multi layer perceptron
-    model = MLPClassifier(hidden_layer_sizes=[train_x.shape[1]//2], tol=0)
-    auroc, auprc = classifier(model, train_x, test_x, train_y, test_y)
+    model = MLPClassifier(hidden_layer_sizes=[train_x.shape[1]//2], tol=0, max_iter=2000)
+    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
     records.append({
         'model': 'mlp',
         'auroc': auroc,
@@ -122,7 +159,7 @@ def discriminative_score(exp_df, syn_df, out_dir):
     
     # gradient boosting
     model = GradientBoostingClassifier(max_depth=None)
-    auroc, auprc = classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
     records.append({
         'model': 'gb',
         'auroc': auroc,
@@ -131,7 +168,7 @@ def discriminative_score(exp_df, syn_df, out_dir):
     
     # k nearest neighbors
     model = KNeighborsClassifier()
-    auroc, auprc = classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
     records.append({
         'model': 'knn',
         'auroc': auroc,
@@ -140,7 +177,7 @@ def discriminative_score(exp_df, syn_df, out_dir):
     
     # naive bayes
     model = GaussianNB()
-    auroc, auprc = classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
     records.append({
         'model': 'nb',
         'auroc': auroc,
@@ -151,46 +188,68 @@ def discriminative_score(exp_df, syn_df, out_dir):
     df.to_csv(out_dir + '/discriminative_score.tsv', sep='\t')
     
 
-def kstest(exp_df, syn_df, out_dir):    
+def evaluate_kstest(exp_df, syn_df, out_dir):    
     res = kstest(exp_df.to_numpy(), syn_df.to_numpy(), axis=0)
     
-    ks_df = pd.DataFrame(zip(cols, res[0], res[1]), columns=['column', 'statistic', 'p-value'])
+    ks_df = pd.DataFrame(zip(exp_df.columns, res[0], res[1]),
+                         columns=['column', 'statistic', 'p-value'])
     ks_df.to_csv(out_dir + '/kstest.tsv', sep='\t', index=False)
     
+    with open(out_dir + '/kstest-pval.tsv', 'w') as fp:
+        fp.write('mean' + '\t' + str(np.mean(res[1])) + '\n')
+        fp.write('median' + '\t' + str(np.median(res[1])) + '\n')
+        fp.write('minimum' + '\t' + str(np.min(res[1])) + '\n')
+        fp.write('maximum' + '\t' + str(np.max(res[1])) + '\n')
 
 def evaluate_fidelity(exp_df, syn_df, out_dir):
-    kstest(exp_df, syn_df, out_dir)
-    mean_std_corr(exp_df, syn_df, out_dir)
-    discriminative_score(exp_df, syn_df, out_dir)
+    evaluate_kstest(exp_df, syn_df, out_dir)
+    evaluate_mean_std_corr(exp_df, syn_df, out_dir)
+    evaluate_discriminative_score(exp_df, syn_df, out_dir)
 
 def evaluate_correlation(exp_df, syn_df, out_dir):
     exp_corr = exp_df.corr(method='spearman')
     syn_corr = syn_df.corr(method='spearman')
     corr_diff = exp_corr.sub(syn_corr)
+    
+    exp_corr.to_csv(out_dir + '/exp_corr.tsv', sep='\t', index=True)
+    syn_corr.to_csv(out_dir + '/syn_corr.tsv', sep='\t', index=True)
+    corr_diff.to_csv(out_dir + '/corr_diff.tsv', sep='\t', index=True)
+    
     corr_diff = corr_diff.abs()
     avg_diff = corr_diff.sum().sum() / (corr_diff.shape[0] * corr_diff.shape[1])
     
-    exp_corr.to_csv('/exp_corr.tsv', sep='\t', index=True)
-    syn_corr.to_csv('/syn_corr.tsv', sep='\t', index=True)
-    corr_diff.to_csv('/corr_diff.tsv', sep='\t', index=True)
     
-    bins = [-0.1, -0.5, -0.3, -0.1, 0.1, 0.3, 0.5, 1.0]
-    labels = list(range(len(bins)))
-    exp_corr_bins = pd.cut(exp_corr, bins=bins, labels=labels, retbins=False, include_lowest=True)
-    syn_corr_bins = pd.cut(syn_corr, bins=bins, labels=labels, retbins=False, include_lowest=True)
+    
+    def discretize_corr(corr_df):
+        bins = [-1.0, -0.5, -0.3, -0.1, 0.1, 0.3, 0.5, 1.0]
+        labels = list(range(len(bins)-1))
+        
+        bin_df = pd.DataFrame()
+        
+        for col in corr_df.columns:
+            bin_df[col] = pd.cut(corr_df[col],
+                                 bins=bins,
+                                 labels=labels,
+                                 retbins=False,
+                                 include_lowest=True)
+        return bin_df
+   
+    exp_corr_bins = discretize_corr(exp_corr)
+    syn_corr_bins = discretize_corr(syn_corr)
+    
     corr_bins_match = exp_corr_bins.eq(syn_corr_bins)
-    corr_accuracy = corr_bins_match.sum().sum() / (corr_bins_match.shape[0] * corr_bins_match.shape[1])
+    corr_accuracy = (corr_bins_match.sum().sum() / (corr_bins_match.shape[0] * corr_bins_match.shape[1])) * 100.0
     
-    exp_corr_bins.to_csv('/exp_corr_bins.tsv', sep='\t', index=True)
-    syn_corr_bins.to_csv('/syn_corr_bins.tsv', sep='\t', index=True)
-    corr_bins_match.to_csv('/corr_bins_match.tsv', sep='\t', index=True)
+    exp_corr_bins.to_csv(out_dir + '/exp_corr_bins.tsv', sep='\t', index=True)
+    syn_corr_bins.to_csv(out_dir + '/syn_corr_bins.tsv', sep='\t', index=True)
+    corr_bins_match.to_csv(out_dir + '/corr_bins_match.tsv', sep='\t', index=True)
     
     exp_corr = exp_corr.to_numpy().flatten()
     syn_corr = syn_corr.to_numpy().flatten()
     
     res = spearmanr(exp_corr, syn_corr)
     
-    with open('correlation.txt', 'w') as fp:
+    with open(out_dir + '/correlation.tsv', 'w') as fp:
         fp.write('avg_diff' + '\t' + str(avg_diff) + '\n')
         fp.write('corr_accuracy' + '\t' + str(corr_accuracy) + '\n')
         fp.write('corr_corr' + '\t' + str(res[0]) + '\n')
@@ -203,17 +262,17 @@ def evaluate_utility_for_classifier(model,
                                    syn_exp_train_x, syn_exp_train_y,
                                    exp_test_x, exp_test_y):
     
-    trtr_auroc, trtr_auprc = classifier(model, exp_train_x, exp_test_x, exp_train_y, exp_test_y)
-    tstr_auroc, tstr_auprc = classifier(model, syn_train_x, exp_test_x, syn_train_y, exp_test_y)
-    tsrtr_auroc, tsrtr_auprc = classifier(model, syn_exp_train_x, exp_test_x, syn_exp_train_y, exp_test_y)
-    trstr_auroc, trstr_auprc = classifier(model, exp_syn_train_x, exp_test_x, exp_syn_train_y, exp_test_y)
+    trtr_auroc, trtr_auprc = evaluate_classifier(model, exp_train_x, exp_test_x, exp_train_y, exp_test_y)
+    tstr_auroc, tstr_auprc = evaluate_classifier(model, syn_train_x, exp_test_x, syn_train_y, exp_test_y)
+    tsrtr_auroc, tsrtr_auprc = evaluate_classifier(model, syn_exp_train_x, exp_test_x, syn_exp_train_y, exp_test_y)
+    trstr_auroc, trstr_auprc = evaluate_classifier(model, exp_syn_train_x, exp_test_x, exp_syn_train_y, exp_test_y)
 
     record = {
         'model': 'rf',
-        'trtr_auroc': exp_auroc,
-        'trtr_auprc': exp_auprc,
-        'tstr_auroc': syn_auroc,
-        'tstr_auprc': syn_auprc,
+        'trtr_auroc': trtr_auroc,
+        'trtr_auprc': trtr_auprc,
+        'tstr_auroc': tstr_auroc,
+        'tstr_auprc': tstr_auprc,
         'tsrtr_auroc': tsrtr_auroc,
         'tsrtr_auprc': tsrtr_auprc,
         'trstr_auroc': trstr_auroc,
@@ -230,7 +289,7 @@ def evaluate_classification_utility(exp_train_x, exp_train_y,
     records = []
     models = {
         'rf': RandomForestClassifier(max_depth=None),
-        'mlp': MLPClassifier(hidden_layer_sizes=[train_x.shape[1]//2], tol=0),
+        'mlp': MLPClassifier(hidden_layer_sizes=[exp_train_x.shape[1]//2], tol=0, max_iter=2000),
         'gb': GradientBoostingClassifier(max_depth=None),
         'knn': KNeighborsClassifier(),
         'nb': GaussianNB()
@@ -304,7 +363,7 @@ def evaluate_anova_utility(exp_df, syn_df, exp_meta, syn_meta, out_dir):
     exp_pval, syn_pval = exp_pval.align(syn_pval)
     
     res = spearmanr(exp_pval, syn_pval)
-    with open('anova_pvalue_corr.txt', 'w') as fp:
+    with open(out_dir + '/anova_pvalue_corr.tsv', 'w') as fp:
         fp.write('corr' + '\t' + 'pvalue' + '\n')
         fp.write(str(res[0]) + '\t' + str(res[1]) + '\n')
     
@@ -317,6 +376,8 @@ def evaluate_utility(exp_df, syn_df, exp_meta, syn_meta, out_dir):
     meta_col = 'Cohort'
     exp_meta.name = meta_col
     syn_meta.name = meta_col
+    print('exp_meta', exp_meta,
+         'syn_meta', syn_meta)
     
     evaluate_anova_utility(exp_df, syn_df, exp_meta, syn_meta, out_dir)
     
@@ -331,15 +392,15 @@ def evaluate_utility(exp_df, syn_df, exp_meta, syn_meta, out_dir):
     
     exp_train, exp_test = train_test_split(exp_df, train_size=train_count, stratify=exp_df[meta_col])
     syn_train, _ = train_test_split(syn_df, train_size=train_count, stratify=syn_df[meta_col])
-    exp_train_half = train_test_split(exp_train, train_size=0.5, stratify=exp_train[meta_col])
-    syn_train_half = train_test_split(syn_train, train_size=0.5, stratify=syn_train[meta_col])
+    exp_train_half, _ = train_test_split(exp_train, train_size=0.5, stratify=exp_train[meta_col])
+    syn_train_half, _ = train_test_split(syn_train, train_size=0.5, stratify=syn_train[meta_col])
     exp_syn_train = pd.concat([exp_train, syn_train_half], axis=0)
     syn_exp_train = pd.concat([syn_train, exp_train_half], axis=0)
     
     exp_y = list(exp_df[meta_col])
     exp_x = exp_df.drop(columns=[meta_col]).to_numpy()
     syn_y = list(syn_df[meta_col])
-    syn_x =syn_df.drop(columns=[meta_col]).to_numpy()
+    syn_x = syn_df.drop(columns=[meta_col]).to_numpy()
     
     exp_train_y = list(exp_train[meta_col])
     exp_train_x = exp_train.drop(columns=[meta_col]).to_numpy()
@@ -356,6 +417,14 @@ def evaluate_utility(exp_df, syn_df, exp_meta, syn_meta, out_dir):
     syn_exp_train_y = list(syn_exp_train[meta_col])
     syn_exp_train_x = syn_exp_train.drop(columns=[meta_col]).to_numpy()
     
+    evaluate_clustering_utility(exp_x, exp_y, syn_x, syn_y, out_dir)
+    evaluate_classification_utility(exp_train_x, exp_train_y,
+                                    syn_train_x, syn_train_y,
+                                    exp_syn_train_x, exp_syn_train_y,
+                                    syn_exp_train_x, syn_exp_train_y,
+                                    exp_test_x, exp_test_y,
+                                    out_dir)
+    
 def evaluate_membership_inference(train_df, test_df, syn_df, out_dir):
     train_df = train_df.sample(n=test_df.shape[0])
     train_test_df = pd.concat([train_df, test_df], axis=0)
@@ -367,7 +436,7 @@ def evaluate_membership_inference(train_df, test_df, syn_df, out_dir):
     auroc = roc_auc_score(y_true, y_score)
     auprc = average_precision_score(y_true, y_score)
     
-    with open(out_dir + '/membership_inference.txt', 'w') as fp:
+    with open(out_dir + '/membership_inference.tsv', 'w') as fp:
         fp.write('auroc' + '\t' + str(auroc) + '\n')
         fp.write('auprc' + '\t' + str(auprc) + '\n')
     
@@ -393,6 +462,10 @@ def evaluate_re_identification(train_df, test_df, syn_df, out_dir):
     cols1 = columns[:split_idx]
     cols2 = columns[split_idx:]
     
+    print('columns', len(columns),
+         'cols1', len(cols1),
+         'cols2', len(cols2))
+    
     train_df1 = train_df[cols1]
     train_df2 = train_df[cols2]
     
@@ -416,7 +489,14 @@ def evaluate_privacy(train_df, test_df, syn_df, out_dir):
     evaluate_re_identification(train_df, test_df, syn_df, out_dir)
     
 def evaluate_modality(train_df, test_df, syn_df, train_meta, test_meta, syn_meta, out_dir):
+    print('train_df', train_df.shape,
+         'test_df', test_df.shape,
+         'syn_df', syn_df.shape)
+    
     cols = list(set(test_df.columns).intersection(set(syn_df.columns)))
+    print('cols', len(cols))
+    
+    train_df = train_df[cols]
     test_df = test_df[cols]
     syn_df = syn_df[cols]
     
@@ -442,19 +522,19 @@ def evaluate_modality(train_df, test_df, syn_df, train_meta, test_meta, syn_meta
     
 
 def evaluate(**kwargs):
-    train_mic = pd.read_csv(kwargs['train_mic_path'], sep='\t', index='Sample')
-    train_met = pd.read_csv(kwargs['train_met_path'], sep='\t', index='Sample')
-    train_meta = pd.read_csv(kwargs['train_meta_path'], sep='\t', index='Sample')
+    train_mic = pd.read_csv(kwargs['train_mic_path'], sep='\t', index_col='Sample')
+    train_met = pd.read_csv(kwargs['train_met_path'], sep='\t', index_col='Sample')
+    train_meta = pd.read_csv(kwargs['train_meta_path'], sep='\t', index_col='Sample')
     train_mic_met = pd.concat([train_mic, train_met], axis=1)
     
-    test_mic = pd.read_csv(kwargs['test_mic_path'], sep='\t', index='Sample')
-    test_met = pd.read_csv(kwargs['test_met_path'], sep='\t', index='Sample')
-    test_meta = pd.read_csv(kwargs['test_meta_path'], sep='\t', index='Sample')
+    test_mic = pd.read_csv(kwargs['test_mic_path'], sep='\t', index_col='Sample')
+    test_met = pd.read_csv(kwargs['test_met_path'], sep='\t', index_col='Sample')
+    test_meta = pd.read_csv(kwargs['test_meta_path'], sep='\t', index_col='Sample')
     test_mic_met = pd.concat([test_mic, test_met], axis=1)
     
-    syn_mic = pd.read_csv(kwargs['syn_mic_path'], sep='\t', index='Sample')
-    syn_met = pd.read_csv(kwargs['syn_met_path'], sep='\t', index='Sample')
-    syn_meta = pd.read_csv(kwargs['syn_meta_path'], sep='\t', index='Sample')
+    syn_mic = pd.read_csv(kwargs['syn_mic_path'], sep='\t', index_col='Sample')
+    syn_met = pd.read_csv(kwargs['syn_met_path'], sep='\t', index_col='Sample')
+    syn_meta = pd.read_csv(kwargs['syn_meta_path'], sep='\t', index_col='Sample')
     syn_mic_met = pd.concat([syn_mic, syn_met], axis=1)
     
     
@@ -463,6 +543,7 @@ def evaluate(**kwargs):
     evaluate_modality(train_mic_met, test_mic_met, syn_mic_met, train_meta, test_meta, syn_meta, os.getcwd() + '/mic_met')
 
 def main(args):
+    print("evaluate.py")
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
@@ -478,7 +559,7 @@ def main(args):
     
     kwargs = vars(args)
     del kwargs['out_dir']
-    generate_synthetic_data(**kwargs)
+    evaluate(**kwargs)
 
     sys.stdout = original_stdout
     sys.stderr = original_stderr
