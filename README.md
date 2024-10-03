@@ -1,1 +1,1 @@
-# Paired microbiome-metabolome synthetic data generation with prior knowledge
+# Paired gut microbiome-metabolome synthetic data generation with prior knowledge
