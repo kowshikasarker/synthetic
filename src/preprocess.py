@@ -257,6 +257,7 @@ def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, 
         print(len(valid_cols), 'valid_cols')
         
     valid_cols = list(valid_cols)
+    valid_cols.sort()
     print(len(valid_cols), 'valid_cols')
     
     df = df[valid_cols]
@@ -265,7 +266,9 @@ def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, 
     test_df = test_df[valid_cols]
     
     df, train_df, val_df, test_df = impute(df, train_df, val_df, test_df, imputation)
+    print('df', df.tail(5))
     df, train_df, val_df, test_df = normalize(df, train_df, val_df, test_df)
+    print('df', df.tail(5))
     
     return df, train_df, val_df, test_df
     
@@ -281,6 +284,7 @@ def preprocess(**kwargs):
     met_df = met_df.add_prefix('sample:', axis=0)
     met_df = met_df.add_prefix('met:', axis=1)
     met_df = met_df.replace(0, np.nan)
+    print('met_df', met_df.tail(5))
     
     meta_df = pd.read_csv(kwargs['meta_path'], sep='\t', index_col='Sample', usecols=['Sample', 'Study.Group'])
     meta_df.index = meta_df.index.map(str)
@@ -290,8 +294,16 @@ def preprocess(**kwargs):
     train_count = int(kwargs['train_pct'] * meta_df.shape[0])
     val_count = int(kwargs['val_pct'] * meta_df.shape[0])
     
-    train_samples, test_samples, train_cohort, test_cohort = train_test_split(list(meta_df.index), list(meta_df.Cohort), train_size=train_count, stratify=list(meta_df.Cohort))
-    val_samples, test_samples, val_cohort, test_cohort = train_test_split(test_samples, test_cohort, train_size=val_count, stratify=test_cohort)
+    train_samples, test_samples, train_cohort, test_cohort = train_test_split(list(meta_df.index),
+                                                                              list(meta_df.Cohort),
+                                                                              train_size=train_count,
+                                                                              stratify=list(meta_df.Cohort),
+                                                                              random_state=0)
+    val_samples, test_samples, val_cohort, test_cohort = train_test_split(test_samples,
+                                                                          test_cohort,
+                                                                          train_size=val_count,
+                                                                          stratify=test_cohort,
+                                                                          random_state=0)
     
     print(len(train_samples), 'train_samples', len(val_samples), 'val_samples', len(test_samples), 'test_samples')
     
@@ -308,9 +320,17 @@ def preprocess(**kwargs):
     val_mic_df = mic_df.loc[val_samples, :]
     test_mic_df = mic_df.loc[test_samples, :]
     
+    print('train_mic_df', train_mic_df.shape,
+          'val_mic_df', val_mic_df.shape,
+          'test_mic_df', test_mic_df.shape)
+    
     train_met_df = met_df.loc[train_samples, :]
     val_met_df = met_df.loc[val_samples, :]
     test_met_df = met_df.loc[test_samples, :]
+    
+    print('train_met_df', train_met_df.shape,
+          'val_met_df', val_met_df.shape,
+          'test_met_df', test_met_df.shape)
     
     meta_df = pd.get_dummies(meta_df).astype(int)
     
@@ -318,9 +338,24 @@ def preprocess(**kwargs):
     val_meta_df = meta_df.loc[val_samples, :]
     test_meta_df = meta_df.loc[test_samples, :]
     
+    print('train_meta_df', train_meta_df.shape,
+          'val_meta_df', val_meta_df.shape,
+          'test_meta_df', test_meta_df.shape)
     
     mic_df, train_mic_df, val_mic_df, test_mic_df = preprocess_input(mic_df, train_mic_df, val_mic_df, test_mic_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation'])
     met_df, train_met_df, val_met_df, test_met_df = preprocess_input(met_df, train_met_df, val_met_df, test_met_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation'])
+    
+    print('train_mic_df', train_mic_df.shape,
+          'val_mic_df', val_mic_df.shape,
+          'test_mic_df', test_mic_df.shape)
+    
+    print('train_met_df', train_met_df.shape,
+          'val_met_df', val_met_df.shape,
+          'test_met_df', test_met_df.shape)
+    
+    print('train_meta_df', train_meta_df.shape,
+          'val_meta_df', val_meta_df.shape,
+          'test_meta_df', test_meta_df.shape)
     
     mic_df.to_csv('preprocessed_microbiome.tsv', sep='\t', index=True)
     train_mic_df.to_csv('train_microbiome.tsv', sep='\t', index=True)
@@ -403,7 +438,6 @@ def check_corr_prior_args(kwargs):
             raise Exception('prior_top_k is required with --prior')
     
 def main(args):
-    print('preprocess.py')
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
@@ -414,6 +448,8 @@ def main(args):
     
     original_stderr = sys.stderr
     sys.stderr = log_file
+    
+    print('========== preprocess.py ==========')
     
     print(args)
     
