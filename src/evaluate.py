@@ -488,7 +488,13 @@ def evaluate_privacy(train_df, test_df, syn_df, out_dir):
     evaluate_membership_inference(train_df, test_df, syn_df, out_dir)
     evaluate_re_identification(train_df, test_df, syn_df, out_dir)
     
-def evaluate_modality(train_df, test_df, syn_df, train_meta, test_meta, syn_meta, out_dir):
+def evaluate_substitution(train_df,
+                          test_df,
+                          syn_df,
+                          train_meta,
+                          test_meta,
+                          syn_meta,
+                          out_dir):
     print('train_df', train_df.shape,
          'test_df', test_df.shape,
          'syn_df', syn_df.shape)
@@ -520,7 +526,44 @@ def evaluate_modality(train_df, test_df, syn_df, train_meta, test_meta, syn_meta
     Path(pdir).mkdir(parents=True, exist_ok=True)
     evaluate_privacy(train_df, test_df, syn_df, pdir)
     
-
+def evaluate_augmentation(train_df,
+                          test_df,
+                          syn_df,
+                          train_meta,
+                          test_meta,
+                          syn_meta,
+                          out_dir):
+    train_syn_df = pd.concat([train_df, syn_df], axis=0)
+    train_syn_meta = pd.concat([train_meta, syn_meta], axis=0)
+    
+    train_x = train_df.to_numpy()
+    train_y = train_meta.to_numpy()
+    
+    syn_x = syn_df.to_numpy()
+    syn_y = syn_meta.to_numpy()
+    
+    train_syn_x = train_syn_df.to_numpy()
+    train_syn_y = train_syn_meta.to_numpy()
+    
+    test_x = test_df.to_numpy()
+    test_y = test_meta.to_numpy()
+    
+    records = []
+    models = {
+        'rf': RandomForestClassifier(max_depth=None),
+        'mlp': MLPClassifier(hidden_layer_sizes=[train_x.shape[1]//2], tol=0, max_iter=2000),
+        'gb': GradientBoostingClassifier(max_depth=None),
+        'knn': KNeighborsClassifier(),
+        'nb': GaussianNB()
+    }
+    for model_name, model in models.items():
+        record['exp_auroc'], record['exp_auprc'] = evaluate_classifier(model, train_x, test_x, train_y, test_y)
+        record['aug_auroc'], record['aug_auprc'] = evaluate_classifier(model, train_syn_x, test_x, train_syn_y, test_y)
+        record['model'] = model_name
+        records.append(record)
+    df = pd.DataFrame.from_records(records)
+    df.to_csv(out_dir + '/augmentated_classification.tsv', sep='\t', index=False)
+    
 def evaluate(**kwargs):
     train_mic = pd.read_csv(kwargs['train_mic_path'], sep='\t', index_col='Sample')
     train_met = pd.read_csv(kwargs['train_met_path'], sep='\t', index_col='Sample')
@@ -538,9 +581,13 @@ def evaluate(**kwargs):
     syn_mic_met = pd.concat([syn_mic, syn_met], axis=1)
     
     
-    evaluate_modality(train_mic, test_mic, syn_mic, train_meta, test_meta, syn_meta, os.getcwd() + '/mic')
-    evaluate_modality(train_met, test_met, syn_met, train_meta, test_meta, syn_meta, os.getcwd() + '/met')
-    evaluate_modality(train_mic_met, test_mic_met, syn_mic_met, train_meta, test_meta, syn_meta, os.getcwd() + '/mic_met')
+    evaluate_substitution(train_mic, test_mic, syn_mic, train_meta, test_meta, syn_meta, os.getcwd() + '/substitution/mic')
+    evaluate_substitution(train_met, test_met, syn_met, train_meta, test_meta, syn_meta, os.getcwd() + '/substitution/met')
+    evaluate_substitution(train_mic_met, test_mic_met, syn_mic_met, train_meta, test_meta, syn_meta, os.getcwd() + '/substitution/mic_met')
+    
+    evaluate_augmentation(train_mic, test_mic, syn_mic, train_meta, test_meta, syn_meta, os.getcwd() + '/augmentation/mic')
+    evaluate_augmentation(train_met, test_met, syn_met, train_meta, test_meta, syn_meta, os.getcwd() + '/augmentation/met')
+    evaluate_augmentation(train_mic_met, test_mic_met, syn_mic_met, train_meta, test_meta, syn_meta, os.getcwd() + '/augmentation/mic_met')
 
 def main(args):
     print("evaluate.py")
