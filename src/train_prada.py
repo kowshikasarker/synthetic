@@ -1,27 +1,29 @@
-from model import *
-from loss import *
+import json, os, sys, torch, argparse
+import numpy as np
 import pandas as pd
-import json
+import matplotlib.pyplot as plt
+from itertools import product
 from pathlib import Path
 from shutil import copyfile, rmtree
-import argparse
-import os
-import sys
+from subprocess import check_output
+from io import StringIO
+from typing_extensions import override
+
+from model import CombinedHiddenPRADA, SeparateHiddenPRADA
+from loss import KLLoss, BCELoss, MultiLossEarlyStopping
+
 import torch
 import torch.nn.functional as F
-from torch_geometric.nn import GCNConv, Linear
+from torch.optim import AdamW, SGD, RMSprop
+
+from torch_geometric.nn import GCNConv
 from torch_geometric.loader import DataLoader
 from torch_geometric.data import Dataset, Data
 from torch_geometric.transforms import ToUndirected
+
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import EarlyStopping, ModelCheckpoint, Callback
-from pytorch_lightning.loggers import CSVLogger, TensorBoardLogger
-import numpy as np
-from itertools import product
-from torch.optim import Adam
-import shutil
-import matplotlib.pyplot as plt
-from typing_extensions import override
+from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.loggers import CSVLogger
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -49,7 +51,7 @@ def parse_args():
                         help="path to the edges in .tsv formnat",
                         required=True, default=None)
     parser.add_argument("--model_name", type=str,
-                        choices=['separate_hidden', 'combined_hidden', 'unconditional'],
+                        choices=['separate_hidden', 'combined_hidden'],
                         help="name of the synthetic data generation model",
                         required=True, default=None)
     parser.add_argument("--syn_sample_count", type=int,
@@ -70,9 +72,9 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-class MicrobiomeMetabolomeDataset(Dataset):
-    def __init__(self, root, transform=None, pre_transform=None, pre_filter=None):
-        super().__init__(root, transform, pre_transform, pre_filter)
+class MicrobiomeMetabolomePRADADataset(Dataset):
+    def __init__(self, root):
+        super().__init__(root)
         
     @property
     def raw_file_names(self):
@@ -82,28 +84,15 @@ class MicrobiomeMetabolomeDataset(Dataset):
     def processed_file_names(self):
         condition_df = pd.read_csv(self.raw_dir + '/condition.tsv', sep='\t', index_col='Sample')
         return [sample + '.pt' for sample in condition_df.index]
-        #return [str(sample) + '.pt' for sample in condition_df.index]
 
     def process(self):
-        print("process")
         microbiome_df = pd.read_csv(self.raw_dir + '/microbiome.tsv', sep='\t', index_col='Sample')
-        print('microbiome_df', microbiome_df.shape, len(set(microbiome_df.columns)))
-        
         metabolome_df = pd.read_csv(self.raw_dir + '/metabolome.tsv', sep='\t', index_col='Sample')
-        print('metabolome_df', metabolome_df.shape, len(set(metabolome_df.columns)))
-        
         feature_df = pd.concat([microbiome_df, metabolome_df], axis=1) 
-        print('feature_df', feature_df.shape, len(set(feature_df.columns)))
-        
         condition_df = pd.read_csv(self.raw_dir + '/condition.tsv', sep='\t', index_col='Sample')
-        #condition_df.index = condition_df.index.astype(str)
-        print('condition_df.index', condition_df.index.dtype)
         cohort_pct = np.sum(condition_df.to_numpy(), axis=0)
         cohort_pct = cohort_pct / np.sum(cohort_pct)
-        
-        print('condition_df', condition_df.shape, 'cohort_pct', cohort_pct)
         edge_df = pd.read_csv(self.raw_dir + '/edge.tsv', sep='\t')
-        print('edge_df before filtering', edge_df.shape)
         
         nodes = list(feature_df.columns)
         num_nodes = len(nodes)
@@ -114,10 +103,8 @@ class MicrobiomeMetabolomeDataset(Dataset):
             
         feature_df = feature_df.rename(columns=node_id)
         feature_df = feature_df[nid]
-        print('feature_df', feature_df.shape)
         
         edge_df = edge_df[(edge_df.Node1.isin(nodes)) & (edge_df.Node2.isin(nodes))]
-        print('edge_df after filtering', edge_df.shape)
         
         edge_df['Node1_ID'] = edge_df['Node1'].map(node_id)
         edge_df['Node2_ID'] = edge_df['Node2'].map(node_id)
@@ -134,12 +121,10 @@ class MicrobiomeMetabolomeDataset(Dataset):
         self.graph_edges = torch.from_numpy(edge_index).long()
         
         for sample in self.samples:
-            print(sample)
             data = Data()
             data.num_nodes = num_nodes
             feature = feature_df.loc[sample, :].to_numpy()
             feature = feature.reshape((-1, 1))
-            print('feature', feature.shape)
             data.feature = torch.from_numpy(feature).float()
             
             condition = condition_df.loc[sample, :].to_numpy()
@@ -148,22 +133,20 @@ class MicrobiomeMetabolomeDataset(Dataset):
             
             data.edge_index = torch.from_numpy(edge_index).long()
             data.sample = sample
-            #data.sample = str(sample)
-            print('directed edge_index', edge_index.shape)
             data = ToUndirected()(data)
-            print('undirected edge_index', edge_index.shape)
             torch.save(data, self.processed_dir + '/' + sample + '.pt')
-            #torch.save(data, self.processed_dir + '/' + str(sample) + '.pt')
             
     def len(self):
         return len(self.samples)
 
     def get(self, idx):
         return torch.load(self.processed_dir + '/' + self.samples[idx] + '.pt')
-
-        #return torch.load(self.processed_dir + '/' + str(self.samples[idx]) + '.pt')
     
-def create_pyg_dataset(dataset_dir, microbiome_path, metabolome_path, metadata_path, edge_path):
+def create_pyg_dataset(dataset_dir,
+                       microbiome_path,
+                       metabolome_path,
+                       metadata_path,
+                       edge_path):
     raw_dir = dataset_dir + '/raw'
     Path(raw_dir).mkdir(parents=True, exist_ok=True)
     
@@ -176,25 +159,35 @@ def create_pyg_dataset(dataset_dir, microbiome_path, metabolome_path, metadata_p
     copyfile(metadata_path, raw_dir + '/condition.tsv')
     copyfile(edge_path, raw_dir + '/edge.tsv')
         
-    dataset = MicrobiomeMetabolomeDataset(dataset_dir)
+    dataset = MicrobiomeMetabolomePRADADataset(dataset_dir)
     
     return dataset
 
 class Synthesizer(pl.LightningModule):
-    def __init__(self, model_name, feature_dim, condition_dim, hidden_dim, latent_dim, optim_loss, lr, self_loop):
+    def __init__(self,
+                 model_name,
+                 feature_dim,
+                 condition_dim,
+                 hidden_dim,
+                 latent_dim,
+                 optim_loss,
+                 lr,
+                 optimizer):
         super(Synthesizer, self).__init__()
         self.save_hyperparameters()
         model_map = {
-            'separate_hidden': SeparateHiddenModel,
-            'combined_hidden': CombinedHiddenModel,
-            'unconditional': UnconditionalModel
+            'separate_hidden': SeparateHiddenPRADA,
+            'combined_hidden': CombinedHiddenPRADA,
         }
         loss_map = {
             'kl': KLLoss,
             'mse': torch.nn.MSELoss,
             'bce': BCELoss
         }
-        self.model = model_map[model_name](feature_dim, condition_dim, hidden_dim, latent_dim, self_loop)
+        self.model = model_map[model_name](feature_dim,
+                                           condition_dim,
+                                           hidden_dim,
+                                           latent_dim)
         print('self.model', self.model)
         self.feature_dim = feature_dim
         self.condition_dim = condition_dim
@@ -202,8 +195,8 @@ class Synthesizer(pl.LightningModule):
         self.latent_dim = latent_dim
         self.optim_loss = optim_loss
         self.lr = lr
-        self.self_loop = self_loop
         self.loss_modules = {loss: loss_map[loss]() for loss in optim_loss}
+        self.optimizer = optimizer
         print('self.loss_modules', self.loss_modules)
         
     def sample_data(self, cohort_pct, sample_count, graph_edges, feature_count):
@@ -212,10 +205,12 @@ class Synthesizer(pl.LightningModule):
         for i in range(sample_count):
             edge_index.append(torch.add(graph_edges, feature_count))
         edge_index = torch.cat(edge_index, dim=1)
-        print('graph_edges', graph_edges.shape, 'sample_count', sample_count, 'edge_index', edge_index.shape)
+        print('graph_edges', graph_edges.shape,
+              'sample_count', sample_count,
+              'edge_index', edge_index.shape)
         
-        cohort_count = np.ceil(np.multiply(cohort_pct, sample_count)).astype(int)
-        cohort = np.zeros(shape=(sample_count, cohort_count.size))
+        cohort_count = np.round(np.multiply(cohort_pct, sample_count)).astype(int)
+        cohort = np.zeros(shape=(np.sum(cohort_count), cohort_count.size))
         past_samples = 0
         for cohort_i in range(cohort_count.size):
             cohort[past_samples: past_samples+cohort_count[cohort_i], cohort_i] = 1
@@ -231,52 +226,84 @@ class Synthesizer(pl.LightningModule):
         feature = feature.to(self.device)
         condition = condition.to(self.device)
         edge_index = edge_index.to(self.device)
-        print('feature', feature.shape, 'condition', condition.shape, 'edge_index', edge_index.shape)
-        print('feature', feature.dtype, 'condition', condition.dtype, 'edge_index', edge_index.dtype)
         return self.model(feature, condition, edge_index)
     
     def configure_optimizers(self):
-        optimizer = Adam(self.parameters(), lr=self.lr)
-        return optimizer
+        '''if (self.optimizer == 'adam'):
+             return AdamW(self.parameters(),
+                          lr=self.lr,
+                          weight_decay=0.01)
+        elif (self.optimizer == 'sgd'):
+             return SGD(self.parameters(),
+                        lr=self.lr,
+                        momentum=0.9,
+                        weight_decay=0.01)'''
+        return RMSprop(self.parameters(),
+                        lr=self.lr,
+                        momentum=0.9,
+                        weight_decay=0.01)
     
-    def calc_loss(self, pred_feat, true_feat, mean, logvar, z, edge_index):
+    def calc_loss(self,
+                  pred_feat,
+                  true_feat,
+                  mean,
+                  logvar,
+                  z,
+                  edge_index,
+                  prefix):
+        '''print('calc_loss')
+        print('pred_feat', torch.isnan(pred_feat).sum(), torch.isinf(pred_feat).sum())
+        print('true_feat', torch.isnan(true_feat).sum(), torch.isinf(true_feat).sum())
+        print('mean', torch.isnan(mean).sum(), torch.isinf(mean).sum())
+        print('logvar', torch.isnan(logvar).sum(), torch.isinf(logvar).sum())
+        print('z', torch.isnan(z).sum(), torch.isinf(z).sum())
+        print('edge_index', torch.isnan(edge_index).sum(), torch.isinf(edge_index).sum())'''
         loss_dict = {}
         loss = 0
         if ('kl' in self.optim_loss):
-            loss_dict['kl_loss'] = self.loss_modules['kl'](mean, logvar)
-            loss = loss_dict['kl_loss'] + loss
+            kl_loss = self.loss_modules['kl'](mean, logvar)
+            loss = kl_loss/kl_loss.detach() + loss
+            loss_dict[prefix + '_kl_loss'] = kl_loss.item()
         if ('mse' in self.optim_loss):
-            loss_dict['mse_loss'] = self.loss_modules['mse'](pred_feat, true_feat)
-            loss = loss_dict['mse_loss'] + loss
+            mse_loss = self.loss_modules['mse'](pred_feat, true_feat)
+            loss = mse_loss/mse_loss.detach() + loss
+            loss_dict[prefix + '_mse_loss'] = mse_loss.item()
         if ('bce' in self.optim_loss):
-            loss_dict['bce_loss'] = self.loss_modules['bce'](z, edge_index)
-            loss = loss_dict['bce_loss'] + loss
-        loss_dict['loss'] = loss
-        return loss_dict
+            bce_loss = self.loss_modules['bce'](z, edge_index)
+            loss = bce_loss/bce_loss.detach() + loss
+            loss_dict[prefix + '_bce_loss'] = bce_loss.item()
+            
+        loss_dict[prefix + '_loss'] = loss.item()
+        
+        print('loss_dict', loss_dict)
+        self.log_dict(loss_dict, on_step=False, on_epoch=True)
+        return loss
             
     
     def training_step(self, batch, batch_idx):
         print('training_step')
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
-        loss_dict = self.calc_loss(out, batch.feature, mean, logvar, z, batch.edge_index)
-        for loss_name, loss_value in loss_dict.items():
-            self.log('train_'+ loss_name, loss_value.item(),
-                    on_step=False, on_epoch=True)
-        return loss_dict['loss']
+        loss = self.calc_loss(out, batch.feature, mean, logvar, z, batch.edge_index, 'train')
+            
+        for name, param in self.model.named_parameters():
+            print (name, torch.isnan(param.data).sum(), torch.isinf(param.data).sum())
+            print (name, param.data)
+        return loss
     
     def validation_step(self, batch, batch_idx):
         print('validation_step')
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
-        loss_dict = self.calc_loss(out, batch.feature, mean, logvar, z, batch.edge_index)
-        for loss_name, loss_value in loss_dict.items():
-            self.log('val_'+ loss_name, loss_value.item(),
-                    on_step=False, on_epoch=True)
-        return loss_dict['loss']
+        loss = self.calc_loss(out, batch.feature, mean, logvar, z, batch.edge_index, 'val')
+        for name, param in self.model.named_parameters():
+            print (name, torch.isnan(param.data).sum(), torch.isinf(param.data).sum())
+        return loss
     
-    def predict_step(self, batch, batch_idx, dataloader_idx):
+    '''def predict_step(self, batch, batch_idx, dataloader_idx):
         print('predict_step')
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
-        return batch.sample, out
+        for name, param in self.model.named_parameters():
+            print (name, torch.isnan(param.data).sum(), torch.isinf(param.data).sum())
+        return batch.sample, out'''
     
 def plot_metric(train_x, val_x, train_y, val_y, xlabel, ylabel, title, png_path):
     plt.plot(train_x, train_y, label='Train')
@@ -288,6 +315,23 @@ def plot_metric(train_x, val_x, train_y, val_y, xlabel, ylabel, title, png_path)
     plt.legend()
     plt.savefig(png_path)
     plt.close()
+
+def get_free_gpu():
+    gpu_stats = check_output(["nvidia-smi",
+                                         "--format=csv",
+                                         "--query-gpu=memory.used,memory.free"])
+    gpu_stats = gpu_stats.decode("utf-8")
+    gpu_df = pd.read_csv(StringIO(gpu_stats),
+                         names=['memory.used',
+                                'memory.free'],
+                         skiprows=1)
+    gpu_df.to_csv('gpu_memory.tsv', sep='\t')
+    gpu_df['memory.used'] = gpu_df['memory.used'].str.replace(" MiB", "").astype(int)
+    gpu_df['memory.free'] = gpu_df['memory.free'].str.replace(" MiB", "").astype(int)
+    print('GPU usage:\n{}'.format(gpu_df))
+    gpu_id = gpu_df['memory.free'].idxmax()
+    print('Returning GPU{} with {} free MiB'.format(gpu_id, gpu_df.iloc[gpu_id]['memory.free']))
+    return gpu_id  
 
 def generate_synthetic_data(train_mic_path,
                             train_met_path,
@@ -315,15 +359,6 @@ def generate_synthetic_data(train_mic_path,
     print('train_set', train_set.len(),
           'val_set', val_set.len())
     
-    batch_size = 16
-    
-    train_loader = DataLoader(train_set,
-                              batch_size=batch_size,
-                              shuffle=True) # check shuffle in prediction
-    val_loader = DataLoader(val_set,
-                            batch_size=batch_size,
-                            shuffle=False)
-    
     data = train_set[0]
     feature_dim = data.feature.shape[1]
     condition_dim = data.condition.shape[1]
@@ -331,19 +366,19 @@ def generate_synthetic_data(train_mic_path,
     print('feature_dim', feature_dim, data.feature.shape)
     print('condition_dim', condition_dim, data.condition.shape)
     
-    hidden_dim = [2, 4, 8]
-    lr = [1e-1, 1e-3, 1e-5, 1e-7]
-    self_loop = [False, True]
-    patience = [1, 3, 5]
+    hidden_dim = [4, 6]
+    lr = [1e-5]#, 1e-3, 1e-5, 1e-7, 1e-9]
+    batch_size = [4, 8]
+    optimizer = ['adam', 'sgd']
     
-    hparam_label = ['hparam-'+str(i) for i in range(len(hidden_dim)*len(lr)*len(self_loop)*len(patience))]
-    hparams = list(product(hidden_dim, lr, self_loop, patience))
+    hparams = list(product(hidden_dim, lr, batch_size, optimizer))
+    hparam_label = ['hparam-'+str(i) for i in range(len(hparams))]
     
     csv_log_dir = os.getcwd() + '/logs/csv_logs'
     Path(csv_log_dir).mkdir(parents=True, exist_ok=True)
     
     hparam_df = pd.DataFrame(hparams,
-                             columns=['hidden_dim', 'lr', 'self_loop', 'patience'],
+                             columns=['hidden_dim', 'lr', 'batch_size', 'optimizer'],
                              index=hparam_label)
     
     monitor = ['val_' + loss + '_loss' for loss in optim_loss]
@@ -352,53 +387,76 @@ def generate_synthetic_data(train_mic_path,
     for i in range(len(hparam_label)):
         hparam_no = hparam_label[i]
         hparam = hparams[i]
-        print(hparam_no, hparam)
+        print('\n\n')
+        print(hparam_no, hparam, end='\n')
         
         if(os.path.exists(hparam_no)):
-            shutil.rmtree(hparam_no)
+            rmtree(hparam_no)
             
         Path(hparam_no).mkdir(parents=True)
         os.chdir(hparam_no)
         
+        train_loader = DataLoader(train_set,
+                                  batch_size=hparam[2],
+                                  shuffle=True) # check shuffle in prediction
+        val_loader = DataLoader(val_set,
+                                batch_size=hparam[2],
+                                shuffle=False)
+        
         early_stopping = MultiLossEarlyStopping(monitor=monitor,
                                                 mode=['min']*len(monitor),
-                                                patience=[hparam[3]]*len(monitor),
-                                                min_delta=[0]*len(monitor))
+                                                patience=[5]*len(monitor),
+                                                min_delta=[0]*len(monitor),
+                                                check_finite=[True]*len(monitor))
         
-        checkpoint_callback = ModelCheckpoint(save_top_k=1, monitor=hparam_loss, mode='min')
+        checkpoint_callback = ModelCheckpoint(save_top_k=1,
+                                              monitor=hparam_loss,
+                                              mode='min',
+                                              auto_insert_metric_name=True)
         
         hparam_csv_log_dir = csv_log_dir + '/' + hparam_no
         if(os.path.exists(hparam_csv_log_dir)):
-            shutil.rmtree(hparam_csv_log_dir)
+            rmtree(hparam_csv_log_dir)
         
         csv_logger = CSVLogger(hparam_csv_log_dir, name=None)
         
-        synthesizer = Synthesizer(model_name, feature_dim, condition_dim,
-                                  hparam[0], int(hparam[0]//2), optim_loss,
-                                  hparam[1], hparam[2])
+        synthesizer = Synthesizer(model_name,
+                                  feature_dim,
+                                  condition_dim,
+                                  hparam[0],
+                                  int(hparam[0]//2),
+                                  optim_loss,
+                                  hparam[1],
+                                  hparam[2])
         hparam_df.loc[hparam_no, 'param_count'] = sum(p.numel() for p in synthesizer.model.parameters())
         
-        trainer = pl.Trainer(max_epochs=100, # try different values
+        trainer = pl.Trainer(max_epochs=250, # try different values
                              callbacks=[early_stopping,
                                         checkpoint_callback],
                              log_every_n_steps=1,
                              accelerator="cuda",
-                             devices=1,
+                             devices=[get_free_gpu()], # pick the gpu with the max free space -> processes will get distributed across gpus
                              enable_checkpointing=True,
                              logger=[csv_logger],
                              check_val_every_n_epoch=1,
                              val_check_interval=1.0,
-                             enable_progress_bar=False)
+                             enable_progress_bar=False,
+                             detect_anomaly=True,
+                             num_sanity_val_steps=0)
         
-        trainer.fit(synthesizer, train_dataloaders=train_loader, val_dataloaders=val_loader)
+        trainer.fit(synthesizer,
+                    train_dataloaders=train_loader,
+                    val_dataloaders=val_loader)
+        
+        metric_path = hparam_csv_log_dir + '/version_0/metrics.csv'
+        metric_df = pd.read_csv(metric_path, sep=',')
+        
+        hparam_df.loc[hparam_no, 'last_epoch'] = metric_df['epoch'].max()
         
         plot_dir = hparam_csv_log_dir + '/plot'
         Path(plot_dir).mkdir(parents=True, exist_ok=True)
         
         metrics = ['loss'] + [loss_name + '_loss' for loss_name in optim_loss]
-        metric_path = hparam_csv_log_dir + '/version_0/metrics.csv'
-        metric_df = pd.read_csv(metric_path, sep=',')
-        
         for metric in metrics:
             print(metric)
             train_metric = 'train_' + metric
@@ -415,14 +473,12 @@ def generate_synthetic_data(train_mic_path,
             
             plot_metric(train_x, val_x, train_y, val_y, 'Epoch', metric, metric + ' across epochs', plot_dir + '/' + metric + '.png')
     
-        hparam_df.loc[hparam_no, hparam_loss] = metric_df[hparam_loss].min()
+        hparam_df.loc[hparam_no, hparam_loss] = metric_df[hparam_loss].min(skipna=True)
+        feature_count = len(train_set.feature_names)
         
-        assert hparam_df.loc[hparam_no, hparam_loss] == trainer.checkpoint_callback.best_model_score
-        
-        predicted = trainer.predict(ckpt_path='best',
+        '''predicted = trainer.predict(ckpt_path='best',
                                      dataloaders=[train_loader, val_loader]) # train_loader shuffles
         
-        feature_count = len(train_set.feature_names)
             
         out = []
         samples = []
@@ -442,15 +498,15 @@ def generate_synthetic_data(train_mic_path,
         mic_df = out_df[train_set.microbiome_names]
         met_df = out_df[train_set.metabolome_names]
         mic_df.to_csv('reconstructed_microbiome.tsv', sep='\t', index=True)
-        met_df.to_csv('reconstructed_metabolome.tsv', sep='\t', index=True)
+        met_df.to_csv('reconstructed_metabolome.tsv', sep='\t', index=True)'''
         
         best_model = Synthesizer.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
         best_model.eval()
         
         condition, z, out = best_model.sample_data(train_set.cohort_pct, syn_sample_count, train_set.graph_edges, feature_count)
-        samples = ['sample-'+str(i) for i in range(1, syn_sample_count+1)]
         condition = condition.cpu().detach().numpy()
         condition = condition[::feature_count]
+        samples = ['sample-'+str(i) for i in range(1, condition.shape[0]+1)]
         condition_df = pd.DataFrame(condition,
                                    index=samples,
                                    columns=train_set.cohort_names)
@@ -490,7 +546,7 @@ def main(args):
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
-    log_file = open(args.out_dir + '/train.log', 'w')
+    log_file = open(args.out_dir + '/train_prada.log', 'w')
     
     original_stdout = sys.stdout
     sys.stdout = log_file
