@@ -1,1 +1,1 @@
-# Paired gut microbiome-metabolome synthetic data generation with prior knowledge
+# PRADA: An approach to generate PRior Augmented DAta for paired gut microbiome and metabolome
