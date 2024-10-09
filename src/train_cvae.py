@@ -11,7 +11,7 @@ from typing_extensions import override
 
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
-from torch.optim import AdamW
+from torch.optim import RMSprop
 
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
@@ -149,8 +149,10 @@ class Synthesizer(pl.LightningModule):
         return self.model(feature, condition)
     
     def configure_optimizers(self):
-        optimizer = AdamW(self.parameters(), lr=self.lr)
-        return optimizer
+        return RMSprop(self.parameters(),
+                        lr=self.lr,
+                        momentum=0.9,
+                        weight_decay=0.01)
     
     def calc_loss(self, pred_feat, true_feat, mean, logvar, prefix):
         loss_dict = {}
@@ -163,12 +165,6 @@ class Synthesizer(pl.LightningModule):
         mse_loss = self.loss_modules['mse'](pred_feat, true_feat)
         loss += mse_loss/mse_loss.detach()
         loss_dict[prefix + '_mse_loss'] = mse_loss.item()
-        
-        '''l1_loss = [p.abs().sum() for p in self.model.parameters()]
-        print('l1_loss', l1_loss)
-        l1_loss = torch.mean(torch.Tensor(l1_loss))
-        loss = l1_loss + loss
-        loss_dict[prefix + '_l1_loss'] = l1_loss.item()'''
         
         loss_dict[prefix + '_loss'] = loss
         
@@ -187,11 +183,6 @@ class Synthesizer(pl.LightningModule):
         z, mean, logvar, out = self.forward(batch['feature'], batch['condition'])
         loss = self.calc_loss(out, batch['feature'], mean, logvar, 'val')
         return loss
-    
-    '''def predict_step(self, batch, batch_idx, dataloader_idx):
-        print('predict_step')
-        z, mean, logvar, out = self.forward(batch['feature'], batch['condition'])
-        return batch['sample'], out'''
     
 def plot_metric(train_x, val_x, train_y, val_y, xlabel, ylabel, title, png_path):
     plt.plot(train_x, train_y, label='Train')
@@ -245,7 +236,7 @@ def generate_synthetic_data(train_mic_path,
     print('condition_dim', condition_dim)
     
     hidden_dim = [feature_dim//2, feature_dim//4]
-    lr = [1e-5, 1e-6]
+    lr = [1e-5, 1e-6, 1e-7]
     batch_size = [4, 8]
     
     hparams = list(product(hidden_dim, lr, batch_size))
@@ -279,7 +270,8 @@ def generate_synthetic_data(train_mic_path,
         early_stopping = MultiLossEarlyStopping(monitor=['val_mse_loss', 'val_kl_loss'],
                                                 mode=['min', 'min'],
                                                 patience=[5, 5],
-                                                min_delta=[0, 0])
+                                                min_delta=[0, 0],
+                                                check_finite=[True, True])
         
         checkpoint_callback = ModelCheckpoint(save_top_k=1,
                                               monitor='val_mse_loss',
@@ -349,34 +341,7 @@ def generate_synthetic_data(train_mic_path,
                         metric+' across epochs',
                         plot_dir + '/' + metric + '.png')
     
-        hparam_df.loc[hparam_no, 'val_mse_loss'] = metric_df['val_mse_loss'].min()
-        
-        print('hparam_df.loc[hparam_no, val_mse_loss]', hparam_df.loc[hparam_no, 'val_mse_loss'])
-        print('trainer.checkpoint_callback.best_model_score', trainer.checkpoint_callback.best_model_score)
-        assert hparam_df.loc[hparam_no, 'val_mse_loss'] == trainer.checkpoint_callback.best_model_score
-        
-        
-        '''
-        predicted = trainer.predict(ckpt_path='best',
-                                     dataloaders=[train_loader, val_loader])
-        out = []
-        samples = []
-        for dataloader_idx in range(len(predicted)):
-            for batch_idx in range(len(predicted[dataloader_idx])):
-                samples.extend(predicted[dataloader_idx][batch_idx][0])
-                out.append(predicted[dataloader_idx][batch_idx][1])
-                
-        out = torch.concat(out, dim=0)
-        out = out.cpu().detach().numpy()
-        
-        out_df = pd.DataFrame(out,
-                              columns=train_set.feature_names,
-                              index=samples)
-        out_df.index.name = 'Sample'
-        mic_df = out_df[train_set.microbiome_names]
-        met_df = out_df[train_set.metabolome_names]
-        mic_df.to_csv('reconstructed_microbiome.tsv', sep='\t', index=True)
-        met_df.to_csv('reconstructed_metabolome.tsv', sep='\t', index=True)'''
+        hparam_df.loc[hparam_no, 'val_mse_loss'] = metric_df['val_mse_loss'].min(skipna=True)
         
         best_model = Synthesizer.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
         best_model.eval()

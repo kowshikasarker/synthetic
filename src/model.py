@@ -190,18 +190,16 @@ class CombinedHiddenPRADA(torch.nn.Module):
 class SeparateHiddenPRADAEncoder(torch.nn.Module):
     def __init__(self, feature_dim, condition_dim, hidden_dim, latent_dim):
         super(SeparateHiddenPRADAEncoder, self).__init__()
-        self.conv1 = GCNConv(feature_dim, hidden_dim, add_self_loops=True) # self_loop -> true/false
-        self.conv2 = GCNConv(condition_dim, hidden_dim, add_self_loops=True)
-        self.conv3 = GCNConv(2*hidden_dim, hidden_dim, add_self_loops=True)
-        self.mean = GCNConv(hidden_dim, latent_dim, add_self_loops=True)
-        self.logvar = GCNConv(hidden_dim, latent_dim, add_self_loops=True)
+        self.f2h = GCNConv(feature_dim, hidden_dim, add_self_loops=True) # self_loop -> true/false
+        self.c2h = GCNConv(condition_dim, hidden_dim, add_self_loops=True)
+        self.mean = GCNConv(2*hidden_dim, latent_dim, add_self_loops=True)
+        self.logvar = GCNConv(2*hidden_dim, latent_dim, add_self_loops=True)
 
     def forward(self, feature, condition, edge_index):
         print('SeparateHiddenEncoder', 'edge_index', edge_index.dtype)
-        f2h = self.conv1(feature, edge_index).tanh()
-        c2h = self.conv2(condition, edge_index).tanh()
+        f2h = self.f2h(feature, edge_index).tanh()
+        c2h = self.c2h(condition, edge_index).tanh()
         h = torch.concat([f2h, c2h], dim=1)
-        h = self.conv3(h, edge_index).tanh()
         mean = self.mean(h, edge_index)
         logvar = self.logvar(h, edge_index)
         noise = torch.randn(feature.shape[0], logvar.shape[1])
@@ -212,17 +210,15 @@ class SeparateHiddenPRADAEncoder(torch.nn.Module):
 class SeparateHiddenPRADADecoder(torch.nn.Module):
     def __init__(self, latent_dim, condition_dim, hidden_dim, output_dim):
         super(SeparateHiddenPRADADecoder, self).__init__()
-        self.conv1 = GCNConv(latent_dim, hidden_dim, add_self_loops=True)
-        self.conv2 = GCNConv(condition_dim, hidden_dim, add_self_loops=True)
-        self.conv3 = GCNConv(2*hidden_dim, hidden_dim, add_self_loops=True)
-        self.conv4 = GCNConv(hidden_dim, output_dim, add_self_loops=True)
+        self.z2h = GCNConv(latent_dim, hidden_dim, add_self_loops=True)
+        self.c2h = GCNConv(condition_dim, hidden_dim, add_self_loops=True)
+        self.out = GCNConv(2*hidden_dim, output_dim, add_self_loops=True)
 
     def forward(self, latent, condition, edge_index):
-        z2h = self.conv1(latent, edge_index).tanh()
-        c2h = self.conv2(condition, edge_index).tanh()
+        z2h = self.z2h(latent, edge_index).tanh()
+        c2h = self.c2h(condition, edge_index).tanh()
         h = torch.concat([z2h, c2h], dim=1)
-        h = self.conv3(h, edge_index).tanh()
-        out = self.conv4(h, edge_index)
+        out = self.out(h, edge_index)
         return out
 
 class SeparateHiddenPRADA(torch.nn.Module):

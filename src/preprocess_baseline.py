@@ -3,24 +3,20 @@ from shutil import copy
 
 base_in_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/PRADA'
 #base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/CVAE'
-#base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/SMOTE'
-#base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/NOISE-G' # gaussian
-base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/NOISE-U' # uniform
+base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/SMOTE'
+#base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/NOISE'
 
 datasets = [
-        'YACHIDA_CRC_2019',
-        'iHMP_IBDMDB_2019',
-        'WANG_ESRD_2020',
-        'FRANZOSA_IBD_2019',
-        'ERAWIJANTARI_GASTRIC_CANCER_2020',
-        'MARS_IBS_2020',
-        'KOSTIC_INFANTS_DIABETES_2015',
-        'JACOBS_IBD_FAMILIES_2016',
-        'KIM_ADENOMAS_2020',
-        'SINHA_CRC_2016',
-        'HE_INFANTS_MFGM_2019',
-        'KANG_AUTISM_2017'
-    ]
+    'YACHIDA_CRC_2019',
+    'iHMP_IBDMDB_2019',
+    'FRANZOSA_IBD_2019',
+    'ERAWIJANTARI_GASTRIC_CANCER_2020',
+    'MARS_IBS_2020',
+    'KOSTIC_INFANTS_DIABETES_2015',
+    'JACOBS_IBD_FAMILIES_2016',
+    'KIM_ADENOMAS_2020',
+    'SINHA_CRC_2016'
+]
 
 filenames = [
     'train_microbiome.tsv',
@@ -39,9 +35,13 @@ filenames = [
 
 for dataset_no in range(len(datasets)):
     dataset = datasets[dataset_no]
+    print(dataset)
     out_dir = base_out_dir + '/' + dataset + '/preprocess'
     Path(out_dir).mkdir(exist_ok=True, parents=True)
     for filename in filenames:
         in_path = base_in_dir + '/' + dataset + '/config-1/preprocess/' + filename 
         out_path = out_dir + '/' + filename
+        print('in_path', in_path)
+        print('out_path', out_path)
         copy(in_path, out_path)
+    print()

@@ -59,11 +59,11 @@ def parse_args():
                         required=True, default=None)
     
     parser.add_argument("--optim_loss", type=str, nargs="+",
-                        choices=['kl', 'mse', 'bce'],
+                        choices=['kl', 'mse'],
                         help="Losses to use for optimizing model parameters",
                         required=True, default=None)
     parser.add_argument("--hparam_loss", type=str,
-                        choices=['kl', 'mse', 'bce'],
+                        choices=['kl', 'mse'],
                         help="loss to use for tuning hyperparameters",
                         required=True, default=None)
     parser.add_argument("--out_dir", type=str,
@@ -171,8 +171,7 @@ class Synthesizer(pl.LightningModule):
                  hidden_dim,
                  latent_dim,
                  optim_loss,
-                 lr,
-                 optimizer):
+                 lr):
         super(Synthesizer, self).__init__()
         self.save_hyperparameters()
         model_map = {
@@ -196,7 +195,6 @@ class Synthesizer(pl.LightningModule):
         self.optim_loss = optim_loss
         self.lr = lr
         self.loss_modules = {loss: loss_map[loss]() for loss in optim_loss}
-        self.optimizer = optimizer
         print('self.loss_modules', self.loss_modules)
         
     def sample_data(self, cohort_pct, sample_count, graph_edges, feature_count):
@@ -229,15 +227,6 @@ class Synthesizer(pl.LightningModule):
         return self.model(feature, condition, edge_index)
     
     def configure_optimizers(self):
-        '''if (self.optimizer == 'adam'):
-             return AdamW(self.parameters(),
-                          lr=self.lr,
-                          weight_decay=0.01)
-        elif (self.optimizer == 'sgd'):
-             return SGD(self.parameters(),
-                        lr=self.lr,
-                        momentum=0.9,
-                        weight_decay=0.01)'''
         return RMSprop(self.parameters(),
                         lr=self.lr,
                         momentum=0.9,
@@ -251,13 +240,6 @@ class Synthesizer(pl.LightningModule):
                   z,
                   edge_index,
                   prefix):
-        '''print('calc_loss')
-        print('pred_feat', torch.isnan(pred_feat).sum(), torch.isinf(pred_feat).sum())
-        print('true_feat', torch.isnan(true_feat).sum(), torch.isinf(true_feat).sum())
-        print('mean', torch.isnan(mean).sum(), torch.isinf(mean).sum())
-        print('logvar', torch.isnan(logvar).sum(), torch.isinf(logvar).sum())
-        print('z', torch.isnan(z).sum(), torch.isinf(z).sum())
-        print('edge_index', torch.isnan(edge_index).sum(), torch.isinf(edge_index).sum())'''
         loss_dict = {}
         loss = 0
         if ('kl' in self.optim_loss):
@@ -297,13 +279,6 @@ class Synthesizer(pl.LightningModule):
         for name, param in self.model.named_parameters():
             print (name, torch.isnan(param.data).sum(), torch.isinf(param.data).sum())
         return loss
-    
-    '''def predict_step(self, batch, batch_idx, dataloader_idx):
-        print('predict_step')
-        z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
-        for name, param in self.model.named_parameters():
-            print (name, torch.isnan(param.data).sum(), torch.isinf(param.data).sum())
-        return batch.sample, out'''
     
 def plot_metric(train_x, val_x, train_y, val_y, xlabel, ylabel, title, png_path):
     plt.plot(train_x, train_y, label='Train')
@@ -367,18 +342,17 @@ def generate_synthetic_data(train_mic_path,
     print('condition_dim', condition_dim, data.condition.shape)
     
     hidden_dim = [4, 6]
-    lr = [1e-5]#, 1e-3, 1e-5, 1e-7, 1e-9]
+    lr = [1e-5, 1e-6, 1e-7]
     batch_size = [4, 8]
-    optimizer = ['adam', 'sgd']
     
-    hparams = list(product(hidden_dim, lr, batch_size, optimizer))
+    hparams = list(product(hidden_dim, lr, batch_size))
     hparam_label = ['hparam-'+str(i) for i in range(len(hparams))]
     
     csv_log_dir = os.getcwd() + '/logs/csv_logs'
     Path(csv_log_dir).mkdir(parents=True, exist_ok=True)
     
     hparam_df = pd.DataFrame(hparams,
-                             columns=['hidden_dim', 'lr', 'batch_size', 'optimizer'],
+                             columns=['hidden_dim', 'lr', 'batch_size'],
                              index=hparam_label)
     
     monitor = ['val_' + loss + '_loss' for loss in optim_loss]
@@ -426,11 +400,10 @@ def generate_synthetic_data(train_mic_path,
                                   hparam[0],
                                   int(hparam[0]//2),
                                   optim_loss,
-                                  hparam[1],
-                                  hparam[2])
+                                  hparam[1])
         hparam_df.loc[hparam_no, 'param_count'] = sum(p.numel() for p in synthesizer.model.parameters())
         
-        trainer = pl.Trainer(max_epochs=250, # try different values
+        trainer = pl.Trainer(max_epochs=100, # try different values
                              callbacks=[early_stopping,
                                         checkpoint_callback],
                              log_every_n_steps=1,
@@ -475,30 +448,6 @@ def generate_synthetic_data(train_mic_path,
     
         hparam_df.loc[hparam_no, hparam_loss] = metric_df[hparam_loss].min(skipna=True)
         feature_count = len(train_set.feature_names)
-        
-        '''predicted = trainer.predict(ckpt_path='best',
-                                     dataloaders=[train_loader, val_loader]) # train_loader shuffles
-        
-            
-        out = []
-        samples = []
-        for dataloader_idx in range(len(predicted)):
-            for batch_idx in range(len(predicted[dataloader_idx])):
-                print(predicted[dataloader_idx][batch_idx][0])
-                samples = samples + predicted[dataloader_idx][batch_idx][0]
-                out.append(predicted[dataloader_idx][batch_idx][1])
-                
-        out = torch.concat(out, dim=0)
-        out = out.cpu().detach().numpy()
-        out = out.reshape(-1, feature_count)
-        print('out', out.shape)
-        
-        out_df = pd.DataFrame(out, columns=train_set.feature_names, index=samples)
-        out_df.index.name = 'Sample'
-        mic_df = out_df[train_set.microbiome_names]
-        met_df = out_df[train_set.metabolome_names]
-        mic_df.to_csv('reconstructed_microbiome.tsv', sep='\t', index=True)
-        met_df.to_csv('reconstructed_metabolome.tsv', sep='\t', index=True)'''
         
         best_model = Synthesizer.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
         best_model.eval()

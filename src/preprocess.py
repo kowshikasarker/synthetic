@@ -290,6 +290,7 @@ def preprocess(**kwargs):
     meta_df.index = meta_df.index.map(str)
     meta_df = meta_df.add_prefix('sample:', axis=0)
     meta_df = meta_df.rename(columns={'Study.Group': 'Cohort'})
+    meta_df['Cohort'] = meta_df['Cohort'].astype(str)
         
     train_count = int(kwargs['train_pct'] * meta_df.shape[0])
     val_count = int(kwargs['val_pct'] * meta_df.shape[0])
@@ -332,7 +333,12 @@ def preprocess(**kwargs):
           'val_met_df', val_met_df.shape,
           'test_met_df', test_met_df.shape)
     
+    print('meta_df', meta_df.head())
+    print(len(set(meta_df['Cohort'])))
+    
     meta_df = pd.get_dummies(meta_df).astype(int)
+    
+    print('meta_df', meta_df.head())
     
     train_meta_df = meta_df.loc[train_samples, :]
     val_meta_df = meta_df.loc[val_samples, :]

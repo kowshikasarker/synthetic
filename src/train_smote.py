@@ -1,5 +1,4 @@
 import argparse
-from math import ceil
 from pathlib import Path
 from imblearn.over_sampling import SMOTE
 import os
@@ -45,20 +44,17 @@ def generate_synthetic_data(train_mic_path,
     dummy_meta.columns = [meta_col]
     print('dummy_meta', type(dummy_meta[meta_col]))
     
-    
     cohort_pct = dict(dummy_meta[meta_col].value_counts(normalize=True))
     train_cohort_count = dict(dummy_meta[meta_col].value_counts(normalize=False))
     syn_cohort_count = {
-        key: int(ceil((syn_sample_count*value)))+train_cohort_count[key] for key, value in cohort_pct.items()
+        key: int(round((syn_sample_count*value))+train_cohort_count[key]) for key, value in cohort_pct.items()
     }
     
     print('cohort_pct', cohort_pct)
     print('train_cohort_count', train_cohort_count)
     print('syn_cohort_count', syn_cohort_count)
     
-    train_df = pd.concat([train_mic, train_met], axis=1)
-    train_df = pd.concat([train_df, dummy_meta], axis=1)
-    
+    train_df = pd.concat([train_mic, train_met, dummy_meta], axis=1)
     train_y = train_df[meta_col].to_numpy().flatten()
     print('train_y', train_y)
     train_x = train_df.drop(columns=meta_col).to_numpy()
@@ -70,7 +66,8 @@ def generate_synthetic_data(train_mic_path,
           'train_y', train_y.shape
          )
     
-    smote = SMOTE(sampling_strategy=syn_cohort_count)
+    smote = SMOTE(sampling_strategy=syn_cohort_count,
+                 k_neighbors=3)
     smote_x, smote_y = smote.fit_resample(train_x, train_y)
     
     smote_data = np.concatenate([smote_x, smote_y.reshape(-1, 1)], axis=1)
@@ -81,7 +78,7 @@ def generate_synthetic_data(train_mic_path,
     merged_df = pd.merge(smote_df,
                       train_df,
                       indicator=True,
-                      how='left',
+                      how='outer',
                       on=list(train_df.columns))
     syn_df = merged_df.query('_merge=="left_only"').drop('_merge', axis=1)
     rec_df = merged_df.query('_merge!="left_only"').drop('_merge', axis=1)
