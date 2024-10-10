@@ -9,7 +9,7 @@ from subprocess import check_output
 from io import StringIO
 from typing_extensions import override
 
-from model import CombinedHiddenPRADA, SeparateHiddenPRADA
+from model import CombinedHiddenGCVAE, SeparateHiddenGCVAE
 from loss import KLLoss, BCELoss, MultiLossEarlyStopping
 
 import torch
@@ -72,7 +72,7 @@ def parse_args():
     args = parser.parse_args()
     return args
 
-class MicrobiomeMetabolomePRADADataset(Dataset):
+class MicrobiomeMetabolomeGCVAEDataset(Dataset):
     def __init__(self, root):
         super().__init__(root)
         
@@ -159,7 +159,7 @@ def create_pyg_dataset(dataset_dir,
     copyfile(metadata_path, raw_dir + '/condition.tsv')
     copyfile(edge_path, raw_dir + '/edge.tsv')
         
-    dataset = MicrobiomeMetabolomePRADADataset(dataset_dir)
+    dataset = MicrobiomeMetabolomeGCVAEDataset(dataset_dir)
     
     return dataset
 
@@ -175,8 +175,8 @@ class Synthesizer(pl.LightningModule):
         super(Synthesizer, self).__init__()
         self.save_hyperparameters()
         model_map = {
-            'separate_hidden': SeparateHiddenPRADA,
-            'combined_hidden': CombinedHiddenPRADA,
+            'separate_hidden': SeparateHiddenGCVAE,
+            'combined_hidden': CombinedHiddenGCVAE,
         }
         loss_map = {
             'kl': KLLoss,
@@ -250,10 +250,6 @@ class Synthesizer(pl.LightningModule):
             mse_loss = self.loss_modules['mse'](pred_feat, true_feat)
             loss = mse_loss/mse_loss.detach() + loss
             loss_dict[prefix + '_mse_loss'] = mse_loss.item()
-        if ('bce' in self.optim_loss):
-            bce_loss = self.loss_modules['bce'](z, edge_index)
-            loss = bce_loss/bce_loss.detach() + loss
-            loss_dict[prefix + '_bce_loss'] = bce_loss.item()
             
         loss_dict[prefix + '_loss'] = loss.item()
         
@@ -341,9 +337,12 @@ def generate_synthetic_data(train_mic_path,
     print('feature_dim', feature_dim, data.feature.shape)
     print('condition_dim', condition_dim, data.condition.shape)
     
-    hidden_dim = [4, 6]
-    lr = [1e-5, 1e-6, 1e-7]
-    batch_size = [4, 8]
+    #hidden_dim = [4, 6]
+    #lr = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5]
+    #batch_size = [4, 8]
+    hidden_dim = [2]
+    lr = [1e-6, 1e-7, 1e-8]
+    batch_size = [256]
     
     hparams = list(product(hidden_dim, lr, batch_size))
     hparam_label = ['hparam-'+str(i) for i in range(len(hparams))]
@@ -354,6 +353,7 @@ def generate_synthetic_data(train_mic_path,
     hparam_df = pd.DataFrame(hparams,
                              columns=['hidden_dim', 'lr', 'batch_size'],
                              index=hparam_label)
+    hparam_df.to_csv(csv_log_dir + '/hyperparameters.tsv', sep='\t', index=True)
     
     monitor = ['val_' + loss + '_loss' for loss in optim_loss]
     hparam_loss = 'val_' + hparam_loss + '_loss'
@@ -380,7 +380,7 @@ def generate_synthetic_data(train_mic_path,
         early_stopping = MultiLossEarlyStopping(monitor=monitor,
                                                 mode=['min']*len(monitor),
                                                 patience=[5]*len(monitor),
-                                                min_delta=[0]*len(monitor),
+                                                min_delta=[1e-5]*len(monitor),
                                                 check_finite=[True]*len(monitor))
         
         checkpoint_callback = ModelCheckpoint(save_top_k=1,
@@ -403,7 +403,7 @@ def generate_synthetic_data(train_mic_path,
                                   hparam[1])
         hparam_df.loc[hparam_no, 'param_count'] = sum(p.numel() for p in synthesizer.model.parameters())
         
-        trainer = pl.Trainer(max_epochs=100, # try different values
+        trainer = pl.Trainer(max_epochs=-1, # try different values
                              callbacks=[early_stopping,
                                         checkpoint_callback],
                              log_every_n_steps=1,
@@ -495,7 +495,7 @@ def main(args):
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
-    log_file = open(args.out_dir + '/train_prada.log', 'w')
+    log_file = open(args.out_dir + '/train_GCVAE.log', 'w')
     
     original_stdout = sys.stdout
     sys.stdout = log_file
