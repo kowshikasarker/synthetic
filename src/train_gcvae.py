@@ -10,11 +10,12 @@ from io import StringIO
 from typing_extensions import override
 
 from model import CombinedHiddenGCVAE, SeparateHiddenGCVAE
-from loss import KLLoss, BCELoss, MultiLossEarlyStopping
+from loss import KLLoss, BCELoss, Annealer
+from callback import MultiLossEarlyStopping, GradientPrinting
 
 import torch
 import torch.nn.functional as F
-from torch.optim import AdamW, SGD, RMSprop
+from torch.optim import Adam, AdamW, SGD, RMSprop
 
 from torch_geometric.nn import GCNConv
 from torch_geometric.loader import DataLoader
@@ -27,58 +28,37 @@ from pytorch_lightning.loggers import CSVLogger
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_mic_path", type=str,
-                        help="path to the train micriobiome data in .tsv format",
+    parser.add_argument("--train_feature_path", type=str,
                         required=True, default=None)
-    parser.add_argument("--train_met_path", type=str,
-                        help="path to the train metabolome data in .tsv format",
-                        required=True, default=None)
-    parser.add_argument("--train_meta_path", type=str,
-                        help="path to the train metadata data in .tsv format",
+    parser.add_argument("--train_condition_path", type=str,
                         required=True, default=None)
     
-    parser.add_argument("--val_mic_path", type=str,
-                        help="path to the validation micriobiome data in .tsv format",
+    parser.add_argument("--val_feature_path", type=str,
                         required=True, default=None)
-    parser.add_argument("--val_met_path", type=str,
-                        help="path to the validation metabolome data in .tsv format",
-                        required=True, default=None)
-    parser.add_argument("--val_meta_path", type=str,
-                        help="path to the validation metadata data in .tsv format",
+    parser.add_argument("--val_condition_path", type=str,
                         required=True, default=None)
     
     parser.add_argument("--edge_path", type=str,
-                        help="path to the edges in .tsv formnat",
                         required=True, default=None)
     parser.add_argument("--model_name", type=str,
                         choices=['separate_hidden', 'combined_hidden'],
-                        help="name of the synthetic data generation model",
                         required=True, default=None)
     parser.add_argument("--syn_sample_count", type=int,
-                        help="count of synthetic samples to generate",
                         required=True, default=None)
     
-    parser.add_argument("--optim_loss", type=str, nargs="+",
-                        choices=['kl', 'mse'],
-                        help="Losses to use for optimizing model parameters",
-                        required=True, default=None)
-    parser.add_argument("--hparam_loss", type=str,
-                        choices=['kl', 'mse'],
-                        help="loss to use for tuning hyperparameters",
-                        required=True, default=None)
     parser.add_argument("--out_dir", type=str,
                         help="path to output dir",
                         required=True, default=None)
     args = parser.parse_args()
     return args
 
-class MicrobiomeMetabolomeGCVAEDataset(Dataset):
+class GCVAEDataset(Dataset):
     def __init__(self, root):
         super().__init__(root)
         
     @property
     def raw_file_names(self):
-        return ['microbiome.tsv', 'metabolome.tsv', 'condition.tsv', 'edge.tsv']
+        return ['feature.tsv', 'condition.tsv', 'edge.tsv']
     
     @property
     def processed_file_names(self):
@@ -86,14 +66,12 @@ class MicrobiomeMetabolomeGCVAEDataset(Dataset):
         return [sample + '.pt' for sample in condition_df.index]
 
     def process(self):
-        microbiome_df = pd.read_csv(self.raw_dir + '/microbiome.tsv', sep='\t', index_col='Sample')
-        metabolome_df = pd.read_csv(self.raw_dir + '/metabolome.tsv', sep='\t', index_col='Sample')
-        feature_df = pd.concat([microbiome_df, metabolome_df], axis=1) 
+        feature_df = pd.read_csv(self.raw_dir + '/feature.tsv', sep='\t', index_col='Sample')
         condition_df = pd.read_csv(self.raw_dir + '/condition.tsv', sep='\t', index_col='Sample')
         cohort_pct = np.sum(condition_df.to_numpy(), axis=0)
         cohort_pct = cohort_pct / np.sum(cohort_pct)
-        edge_df = pd.read_csv(self.raw_dir + '/edge.tsv', sep='\t')
         
+        edge_df = pd.read_csv(self.raw_dir + '/edge.tsv', sep='\t')
         nodes = list(feature_df.columns)
         num_nodes = len(nodes)
         nid = list(range(len(nodes)))
@@ -115,8 +93,6 @@ class MicrobiomeMetabolomeGCVAEDataset(Dataset):
         self.length = len(self.samples)
         self.cohort_pct = cohort_pct
         self.feature_names = nodes
-        self.microbiome_names = list(microbiome_df.columns)
-        self.metabolome_names = list(metabolome_df.columns)
         self.cohort_names = list(condition_df.columns)
         self.graph_edges = torch.from_numpy(edge_index).long()
         
@@ -143,9 +119,8 @@ class MicrobiomeMetabolomeGCVAEDataset(Dataset):
         return torch.load(self.processed_dir + '/' + self.samples[idx] + '.pt')
     
 def create_pyg_dataset(dataset_dir,
-                       microbiome_path,
-                       metabolome_path,
-                       metadata_path,
+                       feature_path,
+                       condition_path,
                        edge_path):
     raw_dir = dataset_dir + '/raw'
     Path(raw_dir).mkdir(parents=True, exist_ok=True)
@@ -154,12 +129,11 @@ def create_pyg_dataset(dataset_dir,
     if(os.path.exists(processed_dir)):
         rmtree(processed_dir, ignore_errors=True)
     
-    copyfile(microbiome_path, raw_dir + '/microbiome.tsv')
-    copyfile(metabolome_path, raw_dir + '/metabolome.tsv')
-    copyfile(metadata_path, raw_dir + '/condition.tsv')
+    copyfile(feature_path, raw_dir + '/feature.tsv')
+    copyfile(condition_path, raw_dir + '/condition.tsv')
     copyfile(edge_path, raw_dir + '/edge.tsv')
         
-    dataset = MicrobiomeMetabolomeGCVAEDataset(dataset_dir)
+    dataset = GCVAEDataset(dataset_dir)
     
     return dataset
 
@@ -170,7 +144,6 @@ class Synthesizer(pl.LightningModule):
                  condition_dim,
                  hidden_dim,
                  latent_dim,
-                 optim_loss,
                  lr):
         super(Synthesizer, self).__init__()
         self.save_hyperparameters()
@@ -181,7 +154,6 @@ class Synthesizer(pl.LightningModule):
         loss_map = {
             'kl': KLLoss,
             'mse': torch.nn.MSELoss,
-            'bce': BCELoss
         }
         self.model = model_map[model_name](feature_dim,
                                            condition_dim,
@@ -192,13 +164,14 @@ class Synthesizer(pl.LightningModule):
         self.condition_dim = condition_dim
         self.hidden_dim = hidden_dim
         self.latent_dim = latent_dim
-        self.optim_loss = optim_loss
         self.lr = lr
-        self.loss_modules = {loss: loss_map[loss]() for loss in optim_loss}
-        print('self.loss_modules', self.loss_modules)
+        self.kl_module = KLLoss()
+        self.mse_module = torch.nn.MSELoss()
+        self.annealer = Annealer(total_steps=50, cyclical=True, shape='linear')
         
     def sample_data(self, cohort_pct, sample_count, graph_edges, feature_count):
         assert graph_edges.max() == feature_count - 1
+        
         edge_index = []
         for i in range(sample_count):
             edge_index.append(torch.add(graph_edges, feature_count))
@@ -227,29 +200,31 @@ class Synthesizer(pl.LightningModule):
         return self.model(feature, condition, edge_index)
     
     def configure_optimizers(self):
-        return RMSprop(self.parameters(),
+        return Adam(self.parameters(),
+                    lr=self.lr)
+        '''return RMSprop(self.parameters(),
                         lr=self.lr,
                         momentum=0.9,
-                        weight_decay=0.01)
+                        weight_decay=0.01) # change weight decay'''
     
     def calc_loss(self,
                   pred_feat,
                   true_feat,
                   mean,
                   logvar,
-                  z,
-                  edge_index,
                   prefix):
         loss_dict = {}
-        loss = 0
-        if ('kl' in self.optim_loss):
-            kl_loss = self.loss_modules['kl'](mean, logvar)
-            loss = kl_loss/kl_loss.detach() + loss
-            loss_dict[prefix + '_kl_loss'] = kl_loss.item()
-        if ('mse' in self.optim_loss):
-            mse_loss = self.loss_modules['mse'](pred_feat, true_feat)
-            loss = mse_loss/mse_loss.detach() + loss
-            loss_dict[prefix + '_mse_loss'] = mse_loss.item()
+        
+        kl_loss = self.kl_module(mean, logvar)
+        loss_dict[prefix + '_kl_loss'] = kl_loss.item()
+        slope, kl_loss = self.annealer(kl_loss/kl_loss.detach())
+        loss_dict[prefix + '_slope'] = slope
+        loss = kl_loss
+        self.annealer.step()
+        
+        mse_loss = self.mse_module(pred_feat, true_feat)
+        loss += mse_loss/mse_loss.detach()
+        loss_dict[prefix + '_mse_loss'] = mse_loss.item()
             
         loss_dict[prefix + '_loss'] = loss.item()
         
@@ -261,19 +236,13 @@ class Synthesizer(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         print('training_step')
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
-        loss = self.calc_loss(out, batch.feature, mean, logvar, z, batch.edge_index, 'train')
-            
-        for name, param in self.model.named_parameters():
-            print (name, torch.isnan(param.data).sum(), torch.isinf(param.data).sum())
-            print (name, param.data)
+        loss = self.calc_loss(out, batch.feature, mean, logvar, 'train')
         return loss
     
     def validation_step(self, batch, batch_idx):
         print('validation_step')
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
-        loss = self.calc_loss(out, batch.feature, mean, logvar, z, batch.edge_index, 'val')
-        for name, param in self.model.named_parameters():
-            print (name, torch.isnan(param.data).sum(), torch.isinf(param.data).sum())
+        loss = self.calc_loss(out, batch.feature, mean, logvar, 'val')
         return loss
     
 def plot_metric(train_x, val_x, train_y, val_y, xlabel, ylabel, title, png_path):
@@ -288,9 +257,7 @@ def plot_metric(train_x, val_x, train_y, val_y, xlabel, ylabel, title, png_path)
     plt.close()
 
 def get_free_gpu():
-    gpu_stats = check_output(["nvidia-smi",
-                                         "--format=csv",
-                                         "--query-gpu=memory.used,memory.free"])
+    gpu_stats = check_output(["nvidia-smi", "--format=csv", "--query-gpu=memory.used,memory.free"])
     gpu_stats = gpu_stats.decode("utf-8")
     gpu_df = pd.read_csv(StringIO(gpu_stats),
                          names=['memory.used',
@@ -304,28 +271,16 @@ def get_free_gpu():
     print('Returning GPU{} with {} free MiB'.format(gpu_id, gpu_df.iloc[gpu_id]['memory.free']))
     return gpu_id  
 
-def generate_synthetic_data(train_mic_path,
-                            train_met_path,
-                            train_meta_path,
-                            val_mic_path,
-                            val_met_path,
-                            val_meta_path,
-                            edge_path,
-                            model_name,
-                            syn_sample_count,
-                            optim_loss,
-                            hparam_loss):
+def generate_synthetic_data(**kwargs):
     
     train_set = create_pyg_dataset(os.getcwd() + '/train_dataset',
-                                   train_mic_path,
-                                   train_met_path,
-                                   train_meta_path,
-                                   edge_path)
+                                   kwargs['train_feature_path'],
+                                   kwargs['train_condition_path'],
+                                   kwargs['edge_path'])
     val_set = create_pyg_dataset(os.getcwd() + '/val_dataset',
-                                 val_mic_path,
-                                 val_met_path,
-                                 val_meta_path,
-                                 edge_path)
+                                 kwargs['val_feature_path'],
+                                 kwargs['val_condition_path'],
+                                 kwargs['edge_path'])
     
     print('train_set', train_set.len(),
           'val_set', val_set.len())
@@ -337,12 +292,10 @@ def generate_synthetic_data(train_mic_path,
     print('feature_dim', feature_dim, data.feature.shape)
     print('condition_dim', condition_dim, data.condition.shape)
     
-    #hidden_dim = [4, 6]
-    #lr = [1e-1, 1e-2, 1e-3, 1e-4, 1e-5]
-    #batch_size = [4, 8]
-    hidden_dim = [2]
-    lr = [1e-6, 1e-7, 1e-8]
-    batch_size = [256]
+    hidden_dim = [4]
+    #lr = [1e-9, 1e-7, 1e-5, 1e-3, 1e-1]
+    lr = [1e-1, 1e-10]
+    batch_size = [32]
     
     hparams = list(product(hidden_dim, lr, batch_size))
     hparam_label = ['hparam-'+str(i) for i in range(len(hparams))]
@@ -355,8 +308,6 @@ def generate_synthetic_data(train_mic_path,
                              index=hparam_label)
     hparam_df.to_csv(csv_log_dir + '/hyperparameters.tsv', sep='\t', index=True)
     
-    monitor = ['val_' + loss + '_loss' for loss in optim_loss]
-    hparam_loss = 'val_' + hparam_loss + '_loss'
     
     for i in range(len(hparam_label)):
         hparam_no = hparam_label[i]
@@ -377,14 +328,15 @@ def generate_synthetic_data(train_mic_path,
                                 batch_size=hparam[2],
                                 shuffle=False)
         
-        early_stopping = MultiLossEarlyStopping(monitor=monitor,
-                                                mode=['min']*len(monitor),
-                                                patience=[5]*len(monitor),
-                                                min_delta=[1e-5]*len(monitor),
-                                                check_finite=[True]*len(monitor))
+        early_stopping = MultiLossEarlyStopping(monitor=['val_kl_loss', 'val_mse_loss'],
+                                                mode=['min', 'min'],
+                                                patience=[5, 5],
+                                                min_delta=[0, 0],
+                                                check_finite=[True, True])
+        gradient_printing = GradientPrinting()
         
         checkpoint_callback = ModelCheckpoint(save_top_k=1,
-                                              monitor=hparam_loss,
+                                              monitor='val_mse_loss',
                                               mode='min',
                                               auto_insert_metric_name=True)
         
@@ -394,18 +346,18 @@ def generate_synthetic_data(train_mic_path,
         
         csv_logger = CSVLogger(hparam_csv_log_dir, name=None)
         
-        synthesizer = Synthesizer(model_name,
+        synthesizer = Synthesizer(kwargs['model_name'],
                                   feature_dim,
                                   condition_dim,
                                   hparam[0],
-                                  int(hparam[0]//2),
-                                  optim_loss,
+                                  hparam[0],
                                   hparam[1])
         hparam_df.loc[hparam_no, 'param_count'] = sum(p.numel() for p in synthesizer.model.parameters())
         
-        trainer = pl.Trainer(max_epochs=-1, # try different values
-                             callbacks=[early_stopping,
-                                        checkpoint_callback],
+        trainer = pl.Trainer(max_epochs=50, # try different values
+                             #callbacks=[early_stopping,
+                             #           checkpoint_callback],
+                             #callbacks=[gradient_printing],
                              log_every_n_steps=1,
                              accelerator="cuda",
                              devices=[get_free_gpu()], # pick the gpu with the max free space -> processes will get distributed across gpus
@@ -429,7 +381,7 @@ def generate_synthetic_data(train_mic_path,
         plot_dir = hparam_csv_log_dir + '/plot'
         Path(plot_dir).mkdir(parents=True, exist_ok=True)
         
-        metrics = ['loss'] + [loss_name + '_loss' for loss_name in optim_loss]
+        metrics = ['loss', 'kl_loss', 'mse_loss']
         for metric in metrics:
             print(metric)
             train_metric = 'train_' + metric
@@ -446,13 +398,13 @@ def generate_synthetic_data(train_mic_path,
             
             plot_metric(train_x, val_x, train_y, val_y, 'Epoch', metric, metric + ' across epochs', plot_dir + '/' + metric + '.png')
     
-        hparam_df.loc[hparam_no, hparam_loss] = metric_df[hparam_loss].min(skipna=True)
+        hparam_df.loc[hparam_no, 'val_mse_loss'] = metric_df['val_mse_loss'].min(skipna=True)
         feature_count = len(train_set.feature_names)
         
         best_model = Synthesizer.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
         best_model.eval()
         
-        condition, z, out = best_model.sample_data(train_set.cohort_pct, syn_sample_count, train_set.graph_edges, feature_count)
+        condition, z, out = best_model.sample_data(train_set.cohort_pct, kwargs['syn_sample_count'], train_set.graph_edges, feature_count)
         condition = condition.cpu().detach().numpy()
         condition = condition[::feature_count]
         samples = ['sample-'+str(i) for i in range(1, condition.shape[0]+1)]
@@ -460,9 +412,9 @@ def generate_synthetic_data(train_mic_path,
                                    index=samples,
                                    columns=train_set.cohort_names)
         condition_df.index.name = 'Sample'
+        condition_df.to_csv('synthetic_condition.tsv', sep='\t', index=True)
         
         writer = pd.ExcelWriter('z.xlsx')
-        
         z = z.cpu().detach().numpy()
         for i in range(z.shape[1]):
             zi = z[:, i]
@@ -478,16 +430,12 @@ def generate_synthetic_data(train_mic_path,
                               columns=train_set.feature_names,
                               index=samples)
         out_df.index.name = 'Sample'
-        mic_df = out_df[train_set.microbiome_names]
-        met_df = out_df[train_set.metabolome_names]
-        condition_df.to_csv('synthetic_metadata.tsv', sep='\t', index=True)
-        mic_df.to_csv('synthetic_microbiome.tsv', sep='\t', index=True)
-        met_df.to_csv('synthetic_metabolome.tsv', sep='\t', index=True)
+        out_df.to_csv('synthetic_feature.tsv', sep='\t', index=True)
         
         os.chdir('..')
         print('\n')
     hparam_df.to_csv(csv_log_dir + '/hyperparameters.tsv', sep='\t', index=True)
-    best_hparam = hparam_df[hparam_loss].idxmin()
+    best_hparam = hparam_df['val_mse_loss'].idxmin()
     with open(csv_log_dir + '/best_hparam.txt', 'w') as fp:
         fp.write(best_hparam)
     
@@ -495,7 +443,7 @@ def main(args):
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
-    log_file = open(args.out_dir + '/train_GCVAE.log', 'w')
+    log_file = open(args.out_dir + '/train_gcvae.log', 'w')
     
     original_stdout = sys.stdout
     sys.stdout = log_file
