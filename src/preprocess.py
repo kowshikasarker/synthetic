@@ -10,21 +10,22 @@ from sklearn.preprocessing import StandardScaler
 import numpy as np
 import networkx as nx
 from sklearn.model_selection import train_test_split
+from math import ceil
+from scipy.stats import spearmanr, pearsonr
+import dcor
+from shutil import rmtree
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mic_path", type=str,
-                        help="path to the micriobiome data in .tsv format",
+    parser.add_argument("--feature_path", type=str,
+                        help="path to the features in .tsv format",
                         required=True, default=None)
-    parser.add_argument("--met_path", type=str,
-                        help="path to the metabolome data in .tsv format",
-                        required=True, default=None)
-    parser.add_argument("--meta_path", type=str,
-                        help="path to the metadata data in .tsv format",
+    parser.add_argument("--condition_path", type=str,
+                        help="path to the condiiton in .tsv format",
                         required=True, default=None)
     
     parser.add_argument("--missing_pct", type=float,
-                        help="max percentage of missing values to keep microbiome or metabolome columns",
+                        help="max percentage of missing values to keep feature columns",
                         required=True, default=None)
     parser.add_argument("--imputation", type=str,
                         choices=['knn'],
@@ -37,144 +38,116 @@ def parse_args():
     parser.add_argument("--val_pct", type=float,
                         help="percentage of sample for validation data",
                         required=True, default=None)
+    
+    parser.add_argument("--corr_method", type=str, choices=['sp', 'pr'],
+                        help="correlation method to contruct the correlation network",
+                        required=False, default='spearman')
+    parser.add_argument("--corr_top_pct", type=float,
+                        help="top k edges to consider in the correlation network",
+                        required=False, default=None)
+    
+    parser.add_argument("--prior_path", type=str,
+                        help="path to prior edges in .tsv format",
+                        required=False, default=None)
+    parser.add_argument("--prior_top_pct", type=float,
+                        help="top k edges to consider in the prior network",
+                        required=False, default=None)
+    
     parser.add_argument("--out_dir", type=str,
                         help="path to the output dir",
                         required=True, default=None)
     
-    parser.add_argument('--corr', action=argparse.BooleanOptionalAction,
-                       required=True, default=None)
-    parser.add_argument("--corr_method", type=str, choices=['spearman', 'pearson'],
-                        help="correlation method to contruct the correlation network",
-                        required=False, default='spearman')
-    parser.add_argument("--corr_top_k", type=int,
-                        help="top k edges to consider in the correlation network",
-                        required=False, default=None)
-    
-    parser.add_argument('--prior', action=argparse.BooleanOptionalAction,
-                       required=True, default=None)
-    parser.add_argument("--mic_mic_prior_path", type=str,
-                        help="path to microbiome-microbiome prior edges in .tsv format",
-                        required=False, default=None)
-    parser.add_argument("--met_met_prior_path", type=str,
-                        help="path to metabolome-metabolome prior edges in .tsv format",
-                        required=False, default=None)
-    parser.add_argument("--mic_met_prior_path", type=str,
-                        help="path to microbiome-metabolome prior edges in .tsv format",
-                        required=False, default=None)
-    parser.add_argument("--prior_top_k", type=int,
-                        help="top k edges to consider in the prior network",
-                        required=False, default=None)
     args = parser.parse_args()
     return args
-
-def get_top_prior_edges(prior_path, node1_set, node2_set, prior_top_k, node1_prefix, node2_prefix):
-    print(node1_prefix, node2_prefix)
-    print('node1_set', node1_set)
-    print('node2_set', node2_set)
     
+    
+def get_prior_edges(prior_path, node_set, prior_top_pct):
+    print('get_prior_edges')
     df = pd.read_csv(prior_path, sep='\t')
-    print(df.head())
     df.columns = ['Node1', 'Node2', 'Weight']
-    df['Node1'] = node1_prefix + df['Node1'].astype(str)
-    df['Node2'] = node2_prefix + df['Node2'].astype(str)
-    print('before filtering', df.shape)
-    df = df[(df['Node1'].isin(node1_set)) & (df['Node2'].isin(node2_set))]
-    edge_nodes = set(df['Node1']).union(set(df['Node2']))
-    print('after filtering', df.shape)
-    print('edge_nodes', len(edge_nodes))
-    
-    df = df.drop_duplicates()
-    print('df before adding rev_df', df.shape)
-    
+    df = df[(df['Node1'].isin(node_set)) & (df['Node2'].isin(node_set))]
+
+    prior_top_cnt = ceil(len(set(df['Node1']).union(set(df['Node2']))) * prior_top_pct)
+    print('prior_top_cnt', prior_top_cnt)
+
     rev_df = df.copy()
     rev_df[['Node1', 'Node2']] = rev_df[['Node2', 'Node1']]
     df = pd.concat([df, rev_df], axis=0)
-    
-    df = df.drop_duplicates()
-    print('df after adding rev_df', df.shape)
-    
+    df = df.drop_duplicates(subset=['Node1', 'Node2'])
+
     df = df.sort_values(by='Weight', ascending=False)
-    print(df.head())
-    print(df.groupby('Node1'))
-    df = df.groupby('Node1').head(prior_top_k).reset_index(drop=True)
-    print('after ranking', df.shape)
+    df = df.groupby('Node1').head(prior_top_cnt).reset_index(drop=True)
     df = df.drop(columns='Weight')
-    print('after ranking', df.shape)
     df = pd.DataFrame(np.sort(df.to_numpy(), axis=1),
                             columns=df.columns,
                             index=df.index)
     df = df.drop_duplicates()
     return df
-    
-    
-def get_prior_edges(mic_mic_prior_path, met_met_prior_path, mic_met_prior_path, mic_set, met_set, prior_top_k):
-    print('get_prior_edges')
-    mic_mic_edges = get_top_prior_edges(mic_mic_prior_path, mic_set, mic_set, prior_top_k, 'mic:', 'mic:')
-    met_met_edges = get_top_prior_edges(met_met_prior_path, met_set, met_set, prior_top_k, 'met:', 'met:')
-    mic_met_edges = get_top_prior_edges(mic_met_prior_path, mic_set, met_set, prior_top_k, 'mic:', 'met:')
-    
-    print('mic_mic_edges', mic_mic_edges.shape, 'met_met_edges', met_met_edges.shape, 'mic_met_edges', mic_met_edges.shape)
-    #print('mic_mic_edges', mic_mic_edges[mic_mic_edges.Node1 == mic_mic_edges.Node2])
-    #print('met_met_edges', met_met_edges[met_met_edges.Node1 == met_met_edges.Node2])
-    #print('mic_met_edges', mic_met_edges[mic_met_edges.Node1 == mic_met_edges.Node2])
-    prior_edges = pd.concat([mic_mic_edges, met_met_edges, mic_met_edges], axis=0)
-    prior_edges = pd.DataFrame(np.sort(prior_edges.to_numpy(), axis=1),
-                            columns=prior_edges.columns,
-                            index=prior_edges.index)
-    prior_edges = prior_edges.drop_duplicates()
-    return prior_edges
 
-
-def get_correlation_edges(mic_df, met_df, corr_method, corr_top_k):
-    print('mic_df isna', mic_df.isna().sum().sum())
-    print('met_df isna', met_df.isna().sum().sum())
+def get_corr_edges(feature_df, corr_method, corr_top_pct):
+    # smaller value means greater dependence/correlation
+    # takes smallest connections
     
-    mic_cols = list(mic_df.columns)
-    met_cols = list(met_df.columns)
+    assert corr_method in ('sp', 'pr', 'dcol', 'dcov')
     
-    data_df = pd.concat([mic_df, met_df], axis=1)
-    print('mic_df', mic_df.shape, 'met_df', met_df.shape, 'data_df', data_df.shape)
+    print('get_corr_edges')
+    print('corr_method', corr_method, flush=True)
     
-    corr_df = data_df.corr(corr_method)
+    def dcov_corr(a, b):
+        print('dcov_corr', flush=True)
+        return dcor.distance_covariance(a, b)
+    
+    def dcol_corr(a, b):
+        print('dcol_corr', flush=True)
+        df = pd.DataFrame(zip(a, b), columns=['a', 'b'])
+        
+        df = df.sort_values(by='a')
+        b1 = df.iloc[:-1, :]['b'].to_numpy()
+        b2 = df.iloc[1:, :]['b'].to_numpy()
+        print('b1', b1.shape, 'b2', b2.shape)
+        b_dist = np.subtract(b2, b1)
+        b_dist = np.abs(b_dist)
+        b_dist = np.mean(b_dist)
+        return b_dist
+    
+    def sp_corr(a, b):
+        print('sp_corr', flush=True)
+        return -abs(spearmanr(a, b)[0])
+    
+    def pr_corr():
+        print('pr_corr', flush=True)
+        return -abs(pearsonr(a, b)[0])
+    
+    corr_func = {
+        'sp': sp_corr,
+        'pr': pr_corr,
+        'dcov': dcov_corr,
+        'dcol': dcol_corr
+    }
+    
+    
+    pairwise_corr = []
+    
+    cols = list(feature_df.columns)    
+    func = corr_func[corr_method]
+    for i in range(len(cols)):
+        row = []
+        for j in range(len(cols)):
+            print('i', i, 'j', j, flush=True)
+            if(i == j):
+                row.append(np.inf)
+            else:
+                row.append(func(feature_df[cols[i]].to_numpy(), feature_df[cols[j]].to_numpy()))
+        pairwise_corr.append(row)
+    corr_df = pd.DataFrame(pairwise_corr, index=cols, columns=cols)
     corr_df.to_csv(corr_method + '_correlation.tsv', sep='\t', index=True)
-    corr_df = corr_df.abs()
-    np.fill_diagonal(corr_df.values, -10)
-    corr_df.to_csv(corr_method + '_correlation_absolute.tsv', sep='\t', index=True)
-    print()
     
-    mic_mic_corr = corr_df.loc[mic_cols, mic_cols]
-    met_met_corr = corr_df.loc[met_cols, met_cols]
-    mic_met_corr = corr_df.loc[mic_cols, met_cols]
-    met_mic_corr = corr_df.loc[met_cols, mic_cols]
+    corr_top_cnt = ceil(corr_top_pct * feature_df.shape[1])
+    print('corr_top_cnt', corr_top_cnt, flush=True)
     
-    print('mic_mic_corr', mic_mic_corr.shape)
-    print('met_met_corr', met_met_corr.shape)
-    print('mic_met_corr', mic_met_corr.shape)
-    print('met_mic_corr', met_mic_corr.shape)
-    
-    def get_rowwise_top_columns(df, top_k):
-        top_cols = ['Top-' + str(i) for i in range(1, top_k+1)]
-        print('df.shape', df.shape)
-        df = pd.DataFrame(df.apply(lambda x: x.nlargest(top_k).index.astype(str).tolist(), axis=1).tolist(), 
-                               columns=top_cols, index=df.index)
-        return df
-    
-    mic_mic_top_corr = get_rowwise_top_columns(mic_mic_corr, corr_top_k)
-    met_met_top_corr = get_rowwise_top_columns(met_met_corr, corr_top_k)
-    mic_met_top_corr = get_rowwise_top_columns(mic_met_corr, corr_top_k)
-    met_mic_top_corr = get_rowwise_top_columns(met_mic_corr, corr_top_k)
-    
-    print('mic_mic_top_corr', mic_mic_top_corr.shape)
-    print('met_met_top_corr', met_met_top_corr.shape)
-    print('mic_met_top_corr', mic_met_top_corr.shape)
-    print('met_mic_top_corr', met_mic_top_corr.shape)
-    
-    top_corr = pd.concat([mic_mic_top_corr,
-                          met_met_top_corr,
-                          mic_met_top_corr,
-                          met_mic_top_corr],
-                         axis=0)
-    print('top_corr', top_corr.shape)
+    top_cols = ['Top-' + str(i) for i in range(1, corr_top_cnt+1)]
+    top_corr = pd.DataFrame(corr_df.apply(lambda x: x.nsmallest(corr_top_cnt).index.astype(str).tolist(), axis=1).tolist(), 
+                               columns=top_cols, index=corr_df.index)
     top_corr = top_corr.stack()
     top_corr = top_corr.droplevel(axis=0, level=1).reset_index()
     top_corr.columns = ['Node1', 'Node2']
@@ -183,13 +156,9 @@ def get_correlation_edges(mic_df, met_df, corr_method, corr_top_k):
                             index=top_corr.index)
     # the sorting is done so that duplicate edges like (Node1, Node2) and (Node2, Node1) become identical and later gets removed by drop_duplicates
     top_corr = top_corr.drop_duplicates()
+    loop = top_corr[top_corr['Node1'] == top_corr['Node2']]
+    assert loop.empty
     return top_corr
-    
-    
-def degree_stat(G):
-    degrees = [val for (node, val) in G.degree()]
-    print(pd.Series(degrees).value_counts())
-    print('min', min(degrees), 'max', max(degrees), 'median', np.median(degrees), 'mean', np.mean(degrees))
 
 def knn_impute(df, train_df, val_df, test_df):
     imputer = KNNImputer()
@@ -258,7 +227,7 @@ def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, 
         
     valid_cols = list(valid_cols)
     valid_cols.sort()
-    print(len(valid_cols), 'valid_cols')
+    print('total', len(valid_cols), 'valid_cols')
     
     df = df[valid_cols]
     train_df = train_df[valid_cols]
@@ -266,39 +235,30 @@ def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, 
     test_df = test_df[valid_cols]
     
     df, train_df, val_df, test_df = impute(df, train_df, val_df, test_df, imputation)
-    print('df', df.tail(5))
     df, train_df, val_df, test_df = normalize(df, train_df, val_df, test_df)
-    print('df', df.tail(5))
     
     return df, train_df, val_df, test_df
     
 def preprocess(**kwargs):
-    mic_df = pd.read_csv(kwargs['mic_path'], sep='\t', index_col='Sample')
-    mic_df.index = mic_df.index.map(str)
-    mic_df = mic_df.add_prefix('sample:', axis=0)
-    mic_df = mic_df.add_prefix('mic:', axis=1)
-    mic_df = mic_df.replace(0, np.nan)
+    feature_df = pd.read_csv(kwargs['feature_path'], sep='\t', index_col='Sample')
+    feature_df = feature_df.add_prefix('feat:', axis=1)
+    feature_df.index = feature_df.index.map(str)
+    feature_df = feature_df.add_prefix('sample:', axis=0)
+    feature_df = feature_df.replace(0, np.nan)
     
-    met_df = pd.read_csv(kwargs['met_path'], sep='\t', index_col='Sample')
-    met_df.index = met_df.index.map(str)
-    met_df = met_df.add_prefix('sample:', axis=0)
-    met_df = met_df.add_prefix('met:', axis=1)
-    met_df = met_df.replace(0, np.nan)
-    print('met_df', met_df.tail(5))
-    
-    meta_df = pd.read_csv(kwargs['meta_path'], sep='\t', index_col='Sample', usecols=['Sample', 'Study.Group'])
-    meta_df.index = meta_df.index.map(str)
-    meta_df = meta_df.add_prefix('sample:', axis=0)
-    meta_df = meta_df.rename(columns={'Study.Group': 'Cohort'})
-    meta_df['Cohort'] = meta_df['Cohort'].astype(str)
+    condition_df = pd.read_csv(kwargs['condition_path'], sep='\t', index_col='Sample', usecols=['Sample', 'Study.Group'])
+    condition_df.index = condition_df.index.map(str)
+    condition_df = condition_df.add_prefix('sample:', axis=0)
+    condition_df = condition_df.rename(columns={'Study.Group': 'Cohort'})
+    condition_df['Cohort'] = condition_df['Cohort'].astype(str)
         
-    train_count = int(kwargs['train_pct'] * meta_df.shape[0])
-    val_count = int(kwargs['val_pct'] * meta_df.shape[0])
+    train_count = int(kwargs['train_pct'] * condition_df.shape[0])
+    val_count = int(kwargs['val_pct'] * condition_df.shape[0])
     
-    train_samples, test_samples, train_cohort, test_cohort = train_test_split(list(meta_df.index),
-                                                                              list(meta_df.Cohort),
+    train_samples, test_samples, train_cohort, test_cohort = train_test_split(list(condition_df.index),
+                                                                              list(condition_df.Cohort),
                                                                               train_size=train_count,
-                                                                              stratify=list(meta_df.Cohort),
+                                                                              stratify=list(condition_df.Cohort),
                                                                               random_state=0)
     val_samples, test_samples, val_cohort, test_cohort = train_test_split(test_samples,
                                                                           test_cohort,
@@ -317,133 +277,71 @@ def preprocess(**kwargs):
     print('test_cohort')
     print(pd.Series(test_cohort).value_counts())
     
-    train_mic_df = mic_df.loc[train_samples, :]
-    val_mic_df = mic_df.loc[val_samples, :]
-    test_mic_df = mic_df.loc[test_samples, :]
+    train_feature_df = feature_df.loc[train_samples, :]
+    val_feature_df = feature_df.loc[val_samples, :]
+    test_feature_df = feature_df.loc[test_samples, :]
     
-    print('train_mic_df', train_mic_df.shape,
-          'val_mic_df', val_mic_df.shape,
-          'test_mic_df', test_mic_df.shape)
+    print('train_feature_df', train_feature_df.shape,
+          'val_feature_df', val_feature_df.shape,
+          'test_feature_df', test_feature_df.shape)
     
-    train_met_df = met_df.loc[train_samples, :]
-    val_met_df = met_df.loc[val_samples, :]
-    test_met_df = met_df.loc[test_samples, :]
+    condition_df = pd.get_dummies(condition_df).astype(int)
     
-    print('train_met_df', train_met_df.shape,
-          'val_met_df', val_met_df.shape,
-          'test_met_df', test_met_df.shape)
+    print('condition_df', condition_df.head())
     
-    print('meta_df', meta_df.head())
-    print(len(set(meta_df['Cohort'])))
+    train_condition_df = condition_df.loc[train_samples, :]
+    val_condition_df = condition_df.loc[val_samples, :]
+    test_condition_df = condition_df.loc[test_samples, :]
     
-    meta_df = pd.get_dummies(meta_df).astype(int)
+    print('train_condition_df', train_condition_df.shape,
+          'val_condition_df', val_condition_df.shape,
+          'test_condition_df', test_condition_df.shape)
     
-    print('meta_df', meta_df.head())
+    feature_df, train_feature_df, val_feature_df, test_feature_df = preprocess_input(feature_df,
+                                                                     train_feature_df,
+                                                                     val_feature_df,
+                                                                     test_feature_df,
+                                                                     train_condition_df,
+                                                                     kwargs['missing_pct'],
+                                                                     kwargs['imputation'])
     
-    train_meta_df = meta_df.loc[train_samples, :]
-    val_meta_df = meta_df.loc[val_samples, :]
-    test_meta_df = meta_df.loc[test_samples, :]
+    print('train_feature_df', train_feature_df.shape,
+          'val_feature_df', val_feature_df.shape,
+          'test_feature_df', test_feature_df.shape)
     
-    print('train_meta_df', train_meta_df.shape,
-          'val_meta_df', val_meta_df.shape,
-          'test_meta_df', test_meta_df.shape)
+    feature_df.to_csv('preprocessed_feature.tsv', sep='\t', index=True)
+    train_feature_df.to_csv('train_feature.tsv', sep='\t', index=True)
+    val_feature_df.to_csv('val_feature.tsv', sep='\t', index=True)
+    test_feature_df.to_csv('test_feature.tsv', sep='\t', index=True)
     
-    mic_df, train_mic_df, val_mic_df, test_mic_df = preprocess_input(mic_df, train_mic_df, val_mic_df, test_mic_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation'])
-    met_df, train_met_df, val_met_df, test_met_df = preprocess_input(met_df, train_met_df, val_met_df, test_met_df, train_meta_df, kwargs['missing_pct'], kwargs['imputation'])
+    condition_df.to_csv('preprocessed_condition.tsv', sep='\t', index=True)
+    train_condition_df.to_csv('train_condition.tsv', sep='\t', index=True)
+    val_condition_df.to_csv('val_condition.tsv', sep='\t', index=True)
+    test_condition_df.to_csv('test_condition.tsv', sep='\t', index=True)
+        
+    corr_edges = get_corr_edges(feature_df, kwargs['corr_method'], kwargs['corr_top_pct'])
+    corr_edges.to_csv('corr_edges.tsv', sep='\t', index=False)
     
-    print('train_mic_df', train_mic_df.shape,
-          'val_mic_df', val_mic_df.shape,
-          'test_mic_df', test_mic_df.shape)
+    dcov_edges = get_corr_edges(feature_df, 'dcov', kwargs['corr_top_pct'])
+    dcov_edges.to_csv('dcov_edges.tsv', sep='\t', index=False)
     
-    print('train_met_df', train_met_df.shape,
-          'val_met_df', val_met_df.shape,
-          'test_met_df', test_met_df.shape)
-    
-    print('train_meta_df', train_meta_df.shape,
-          'val_meta_df', val_meta_df.shape,
-          'test_meta_df', test_meta_df.shape)
-    
-    mic_df.to_csv('preprocessed_microbiome.tsv', sep='\t', index=True)
-    train_mic_df.to_csv('train_microbiome.tsv', sep='\t', index=True)
-    val_mic_df.to_csv('val_microbiome.tsv', sep='\t', index=True)
-    test_mic_df.to_csv('test_microbiome.tsv', sep='\t', index=True)
-    
-    met_df.to_csv('preprocessed_metabolome.tsv', sep='\t', index=True)
-    train_met_df.to_csv('train_metabolome.tsv', sep='\t', index=True)
-    val_met_df.to_csv('val_metabolome.tsv', sep='\t', index=True)
-    test_met_df.to_csv('test_metabolome.tsv', sep='\t', index=True)
-    
-    meta_df.to_csv('preprocessed_metadata.tsv', sep='\t', index=True)
-    train_meta_df.to_csv('train_metadata.tsv', sep='\t', index=True)
-    val_meta_df.to_csv('val_metadata.tsv', sep='\t', index=True)
-    test_meta_df.to_csv('test_metadata.tsv', sep='\t', index=True)
-    
-    edges = []
-    
-    if (kwargs['corr']):
-        corr_edges = get_correlation_edges(train_mic_df, train_met_df, kwargs['corr_method'], kwargs['corr_top_k'])
-        edges.append(corr_edges)
-        corr_edges.to_csv('correlation_edges.tsv', sep='\t', index=False)
-    
-        print('corr_edges duplicates')
-        print(corr_edges[corr_edges.Node1 == corr_edges.Node2])
+    dcol_edges = get_corr_edges(feature_df, 'dcol', kwargs['corr_top_pct'])
+    dcol_edges.to_csv('dcol_edges.tsv', sep='\t', index=False)    
 
-    if (kwargs['prior']):
-        mic_set = set(train_mic_df.columns.astype(str))
-        met_set = set(train_met_df.columns.astype(str))
+    prior_edges = get_prior_edges(kwargs['prior_path'], set(feature_df.columns), kwargs['prior_top_pct'])
+    prior_edges.to_csv('prior_edges.tsv', sep='\t', index=False)
 
-        print('mic_mic_prior_path', kwargs['mic_mic_prior_path'])
-        print('met_met_prior_path', kwargs['met_met_prior_path'])
-        print('mic_met_prior_path', kwargs['mic_met_prior_path'])
-        prior_edges = get_prior_edges(kwargs['mic_mic_prior_path'], kwargs['met_met_prior_path'], kwargs['mic_met_prior_path'], mic_set, met_set, kwargs['prior_top_k'])
-        edges.append(prior_edges)
-        prior_edges.to_csv('prior_edges.tsv', sep='\t', index=False)
-
-        print('prior_edges duplicates')
-        print(prior_edges[prior_edges.Node1 == prior_edges.Node2])
+    print('prior_edges duplicates')
+    print(prior_edges[prior_edges.Node1 == prior_edges.Node2])
     
-    edges = pd.concat(edges, axis=0)
+    edges = pd.concat([corr_edges, dcov_edges, dcol_edges, prior_edges], axis=0)
     edges = edges.drop_duplicates()
     edges.to_csv('edges.tsv', sep='\t', index=False)
     
-    '''
-    corr_ntw = nx.from_pandas_edgelist(corr_edges, source='Node1', target='Node2')
-    prior_ntw = nx.from_pandas_edgelist(prior_edges, source='Node1', target='Node2')
-    common_ntw = nx.intersection(corr_ntw, prior_ntw)
-    
-    print('Correlation network')
-    print(corr_ntw.number_of_nodes(), 'Nodes', corr_ntw.number_of_edges(), 'Edges', nx.number_of_isolates(corr_ntw), 'isolates')
-    corr_ntw.remove_nodes_from(list(nx.isolates(corr_ntw)))
-    degree_stat(corr_ntw)
-    
-    print('Prior network')
-    print(prior_ntw.number_of_nodes(), 'Nodes', prior_ntw.number_of_edges(), 'Edges', nx.number_of_isolates(prior_ntw), 'isolates')
-    prior_ntw.remove_nodes_from(list(nx.isolates(prior_ntw)))
-    degree_stat(prior_ntw)
-    
-    print('Common network')
-    print(common_ntw.number_of_nodes(), 'Nodes', common_ntw.number_of_edges(), 'Edges', nx.number_of_isolates(common_ntw), 'isolates')
-    common_ntw.remove_nodes_from(list(nx.isolates(common_ntw)))
-    degree_stat(common_ntw)'''
-    
-def check_corr_prior_args(kwargs):
-    if (kwargs['corr']):
-        if kwargs['corr_method'] is None:
-            raise Exception('corr_method is required with --corr')
-        if kwargs['corr_top_k'] is None:
-            raise Exception('corr_top_k is required with --corr')    
-        
-    if (kwargs['prior']):
-        if kwargs['mic_mic_prior_path'] is None:
-            raise Exception('mic_mic_prior_path is required with --prior')
-        if kwargs['met_met_prior_path'] is None:
-            raise Exception('met_met_prior_path is required with --prior')
-        if kwargs['mic_met_prior_path'] is None:
-            raise Exception('mic_met_prior_path is required with --prior')
-        if kwargs['prior_top_k'] is None:
-            raise Exception('prior_top_k is required with --prior')
-    
 def main(args):
+    if(os.path.exists(args.out_dir)):
+        rmtree(args.out_dir)
+    
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
@@ -460,7 +358,6 @@ def main(args):
     print(args)
     
     kwargs = vars(args)
-    check_corr_prior_args(kwargs)
     del kwargs['out_dir']
     preprocess(**kwargs)
 
