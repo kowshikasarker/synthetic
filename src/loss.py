@@ -1,5 +1,6 @@
 import torch
 import torch.nn.functional as F
+
 from pytorch_lightning.callbacks import Callback
 from typing_extensions import override
 
@@ -37,59 +38,92 @@ class BCELoss(torch.nn.Module):
         bce_loss = F.binary_cross_entropy_with_logits(adj_pred, adj_true, weight=edge_weight)
         print('z', z.shape, 'edge_index', edge_index.shape, 'bce_loss', bce_loss.shape)
         return bce_loss
+
+class Annealer(torch.nn.Module):
+    """
+    This class is used to anneal the KL divergence loss over the course of training VAEs.
+    After each call, the step() function should be called to update the current epoch.
+    """
+
+    def __init__(self, total_steps, shape, baseline=0.0, cyclical=False, disable=False):
+        """
+        Parameters:
+            total_steps (int): Number of epochs to reach full KL divergence weight.
+            shape (str): Shape of the annealing function. Can be 'linear', 'cosine', or 'logistic'.
+            baseline (float): Starting value for the annealing function [0-1]. Default is 0.0.
+            cyclical (bool): Whether to repeat the annealing cycle after total_steps is reached.
+            disable (bool): If true, the __call__ method returns unchanged input (no annealing).
+        """
+        super(Annealer, self).__init__()
+        self.total_steps = total_steps
+        self.current_step = 0
+        self.cyclical = cyclical
+        self.shape = shape
+        self.baseline = baseline
+        if disable:
+            self.shape = 'none'
+            self.baseline = 0.0
+
+    def forward(self, kl_loss):
+        """
+        Args:
+            kld (torch.tensor): KL divergence loss
+        Returns:
+            out (torch.tensor): KL divergence loss multiplied by the slope of the annealing function.
+        """
+        slope = self.slope()
+        print('slope', slope, 'kl_loss', kl_loss.item())
+        kl_loss = kl_loss * slope
+        print('kl_loss', kl_loss.item())
+        return slope, kl_loss
+
+    def slope(self):
+        if self.shape == 'linear':
+            y = (self.current_step / self.total_steps)
+        elif self.shape == 'cosine':
+            y = (math.cos(math.pi * (self.current_step / self.total_steps - 1)) + 1) / 2
+        elif self.shape == 'logistic':
+            exponent = ((self.total_steps / 2) - self.current_step)
+            y = 1 / (1 + math.exp(exponent))
+        elif self.shape == 'none':
+            y = 1.0
+        else:
+            raise ValueError('Invalid shape for annealing function. Must be linear, cosine, or logistic.')
+        y = self.add_baseline(y)
+        return y
+
+    def step(self):
+        if self.current_step < self.total_steps:
+            self.current_step += 1
+        if self.cyclical and self.current_step >= self.total_steps:
+            self.current_step = 0
+        print('current_step', self.current_step)
+        return
+
+    def add_baseline(self, y):
+        y_out = y * (1 - self.baseline) + self.baseline
+        return y_out
+
+    def cyclical_setter(self, value):
+        if value is not bool:
+            raise ValueError('Cyclical_setter method requires boolean argument (True/False)')
+        else:
+            self.cyclical = value
+        return
     
-class MultiLossEarlyStopping(Callback):
-    def __init__(self, monitor, min_delta, patience, mode, check_finite):
+    
+class GradientPrinting(Callback):
+    def __init__(self):
         super().__init__()
-        self.mode_dict = {"min": torch.lt, "max": torch.gt}
-        self.monitor = monitor
-                
-        self.min_delta = dict(zip(monitor, min_delta))
-        self.patience = dict(zip(monitor, patience))
-        self.mode = dict(zip(monitor, mode))
-        self.check_finite = dict(zip(monitor, check_finite))
         
-        self.best_score = {}
-        self.wait_count = {}
-        
-        torch_inf = torch.tensor(torch.inf)
-        
-        for m in self.monitor:
-            monitor_op = self.mode_dict[self.mode[m]]
-            self.min_delta[m] *= 1 if monitor_op == torch.gt else -1
-            self.best_score[m] = torch_inf if monitor_op == torch.lt else -torch_inf
-            self.wait_count[m] = 0
-    
     @override
-    def on_validation_end(self, trainer, pl_module):
-        logs = trainer.callback_metrics
-        print('logs', logs, end='\n')
+    def on_train_epoch_start(self, trainer, pl_module):
+        print()
+        print('current_epoch', pl_module.current_epoch, end='\n')
         
-        should_stop_count = 0
-        for m in self.monitor:
-            current = logs[m].squeeze()
-            if(self.check_finite[m]):
-                if not (torch.isfinite(current)):
-                    print("Should stop for", m, "(not finite)")
-                    should_stop_count += 1
-                    continue
-            monitor_op = self.mode_dict[self.mode[m]]
-            print('current', current, 'best', self.best_score[m], 'monitor_op', monitor_op)
-            
-            if monitor_op(current - self.min_delta[m], self.best_score[m].to(current.device)):
-                self.best_score[m] = current
-                self.wait_count[m] = 0
-            else:
-                self.wait_count[m] += 1
-                print('self.wait_count', self.wait_count)
-                if self.wait_count[m] >= self.patience[m]:
-                    print("Should stop for", m, " (not improved)")
-                    should_stop_count += 1
-        print("should_stop_count", should_stop_count)
-        should_stop = should_stop_count == len(self.monitor)
-        print('should_stop', should_stop)
-        print('trainer.should_stop', trainer.should_stop)
-        trainer.should_stop = trainer.should_stop or should_stop
-        print('trainer.should_stop', trainer.should_stop)
-        if should_stop:
-            self.stopped_epoch = trainer.current_epoch
+    @override
+    def on_train_end(self, trainer, pl_module):
+        print('Printing gradients', end='\n')
+        for name, param in pl_module.model.named_parameters():
+            print(name)
+            print(param.grad, end='\n')
