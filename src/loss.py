@@ -110,20 +110,3 @@ class Annealer(torch.nn.Module):
         else:
             self.cyclical = value
         return
-    
-    
-class GradientPrinting(Callback):
-    def __init__(self):
-        super().__init__()
-        
-    @override
-    def on_train_epoch_start(self, trainer, pl_module):
-        print()
-        print('current_epoch', pl_module.current_epoch, end='\n')
-        
-    @override
-    def on_train_end(self, trainer, pl_module):
-        print('Printing gradients', end='\n')
-        for name, param in pl_module.model.named_parameters():
-            print(name)
-            print(param.grad, end='\n')
