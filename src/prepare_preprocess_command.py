@@ -6,36 +6,29 @@ from subprocess import Popen
 import warnings
 warnings.filterwarnings("ignore")
 
-
-#base_data_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Data/microbiome-metabolome'
 base_data_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Data/metabolomics_workbench'
-base_result_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/Phase-3/GCVAE'
+base_result_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Manuscript/corr-all/GCVAE'
 
-script_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Code/Phase-3'
+script_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Code/corr-all'
 preprocess_script = script_dir + '/preprocess.py'
 
-#prior_path = '/shared/nas/data/m1/ksarker2/Synthetic/Data/prior/GutNet.tsv'
 met_prior_path = '/shared/nas/data/m1/ksarker2/Synthetic/Data/prior/KEGG.tsv'
 met_filename = 'metabolome.tsv'
 
-'''datasets = [
-    'YACHIDA_CRC_2019',
-    'iHMP_IBDMDB_2019',
-    'MARS_IBS_2020'
-]'''
-
 datasets = ['ST001386']
 
-missing_pct = [0.5] 
-corr_top_pct = [0.02, 0.05, 0.1, 0.15]
-prior_top_pct = [0.0, 0.02, 0.05, 0.1, 0.15]
-train_pct = [0.50]
+feature_count = [10, 40, 70, 100]
+corr_top_pct = [0.10, 0.15, 0.20, 0.25, 0.30]
+prior_top_pct = [0.0, 0.10, 0.15, 0.20, 0.25, 0.30]
+missing_pct = [0.5]
+train_pct = [0.60]
 val_pct = [0.10]
-model_name = ['separate_hidden', 'combined_hidden']
+model_name = ['combined_hidden']
 
-configs = list(product(missing_pct,
+configs = list(product(feature_count,
                        corr_top_pct,
                        prior_top_pct,
+                       missing_pct,
                        train_pct,
                        val_pct,
                        model_name))
@@ -43,12 +36,13 @@ configs = list(product(missing_pct,
 config_count = len(configs)
 config_labels = ['config-'+str(i) for i in range(1, config_count+1)]
 config_df = pd.DataFrame(configs,
-                         columns=['missing_pct',
-                                'corr_top_pct',
-                                'prior_top_pct',
-                                'train_pct',
-                                'val_pct',
-                                'model_name'],
+                         columns=['feature_count',
+                                  'corr_top_pct',
+                                  'prior_top_pct',
+                                  'missing_pct',
+                                  'train_pct',
+                                  'val_pct',
+                                  'model_name'],
                          index=config_labels)
 config_df.index.name = 'config_label'
 config_df.to_csv(base_result_dir + '/config.tsv', sep='\t', index=True)
@@ -67,11 +61,11 @@ for dataset in datasets:
         command = 'python3 ' + preprocess_script + \
         ' --feature_path ' + dataset_dir + '/' + met_filename + \
         ' --condition_path ' + dataset_dir + '/metadata.tsv' + \
-        ' --missing_pct ' + str(config[0]) + \
+        ' --missing_pct ' + str(config[3]) + \
         ' --imputation knn' + \
-        ' --train_pct ' + str(config[3]) + \
-        ' --val_pct ' + str(config[4]) + \
-        ' --corr_method sp' + \
+        ' --feature_count ' + str(config[0]) + \
+        ' --train_pct ' + str(config[4]) + \
+        ' --val_pct ' + str(config[5]) + \
         ' --corr_top_pct ' + str(config[1]) + \
         ' --prior_path ' + met_prior_path + \
         ' --prior_top_pct ' + str(config[2]) + \

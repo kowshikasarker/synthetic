@@ -5,21 +5,16 @@ import os
 import functools
 print = functools.partial(print, flush=True)
 
-summary_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/Summary'
-#plot_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/Plot'
-
-config_df = pd.read_csv('/shared/nas/data/m1/ksarker2/Synthetic/Result/PRADA/config.tsv',
-                          sep='\t', usecols=['config_label', 'corr_top_k', 'prior', 'prior_top_k', 'model_name'])
-
-data_config = config_df[config_df['prior'] == 'no-prior']
-
+summary_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Manuscript/corr-all/Summary'
 fdir = summary_dir + '/substitution/fidelity'
 cdir = summary_dir + '/substitution/correlation'
 udir = summary_dir + '/substitution/utility'
 pdir = summary_dir + '/substitution/privacy'
 adir = summary_dir + '/augmentation'
 
-omics = ['mic', 'met', 'mic_met']
+configs = pd.read_csv('/shared/nas/data/m1/ksarker2/Synthetic/Manuscript/corr-all/GCVAE/config.tsv',
+                          sep='\t', usecols=['config_label', 'feature_count', 'corr_top_pct', 'prior_top_pct', 'model_name'])
+configs = configs.groupby('feature_count')
 
 def generate_table_image(tsv_path, out_dir, max_cols, min_cols, all_max=False, all_min=False):
     print('tsv_path', tsv_path)
@@ -36,7 +31,7 @@ def generate_table_image(tsv_path, out_dir, max_cols, min_cols, all_max=False, a
         print('df', df.shape)
         print(df['method'].value_counts())
         cols = set(df.columns)
-        setting_cols = set(['dataset', 'method', 'config_label', 'corr_top_k', 'prior_top_k', 'model_name', 'prior'])
+        setting_cols = set(['dataset', 'config_label', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
         setting_cols = list(cols.intersection(setting_cols))
         metric_cols = list(cols.difference(setting_cols))
         metric_cols.sort()
@@ -65,10 +60,10 @@ def generate_table_image(tsv_path, out_dir, max_cols, min_cols, all_max=False, a
 # kstest
 
 # baseline comparison
-for omic in omics:
-    omic_dir = fdir + '/' + omic
-    print('omic_dir', omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/kstest-pval.tsv', sep='\t', index_col=0, header=[0, 1, 2])
+for feature_count, config_df in configs:
+    data_config = config_df[config_df['prior_top_pct'] == 0]
+    
+    metric_df = pd.read_csv(fdir + '/' + str(feature_count) + '.kstest-pval.tsv', sep='\t', index_col=0, header=[0, 1, 2])
     print('metric_df', metric_df.shape)
     metric_df = metric_df.transpose().reset_index(names=['dataset', 'method', 'config_label']) 
     print('metric_df', metric_df.shape)
@@ -76,54 +71,48 @@ for omic in omics:
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
     print('metric_df', metric_df.shape)
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    print('prada_df', prada_df.shape)
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    print('prada_df', prada_df.shape)
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    print('gcvae_df', gcvae_df.shape)
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    print('gcvae_df', gcvae_df.shape)
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     print('metric_df', metric_df.shape)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
-    metric_df = metric_df.drop(columns='prior_top_k')
+    metric_df = metric_df.drop(columns='prior_top_pct')
     
-    tsv_path = omic_dir + '/kstest_pval_baseline_vs_prada.tsv'
+    tsv_path = fdir + '/' + str(feature_count) + '.kstest_pval_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
     max_cols = ['mean', 'median', 'minimum', 'maximum']
     min_cols = []
-    generate_table_image(tsv_path, omic_dir, max_cols, min_cols)
+    generate_table_image(tsv_path, fdir, max_cols, min_cols)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = fdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/kstest-pval.tsv', sep='\t', index_col=0, header=[0, 1, 2])
+    metric_df = pd.read_csv(fdir + '/' + str(feature_count) + '.kstest-pval.tsv', sep='\t', index_col=0, header=[0, 1, 2])
     metric_df = metric_df.transpose().reset_index(names=['dataset', 'method', 'config_label']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'prior_top_pct', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['method', 'prior', 'model_name', 'corr_top_k', 'prior_top_k'])
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
     
-    tsv_path = omic_dir + '/kstest_pval_data_vs_data+prior.tsv'
+    tsv_path = fdir + '/' + str(feature_count) + '.kstest_pval_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
     max_cols = ['mean', 'median', 'minimum', 'maximum']
     min_cols = []
-    generate_table_image(tsv_path, omic_dir, max_cols, min_cols)
+    generate_table_image(tsv_path, fdir, max_cols, min_cols)
 
 # mean_std_corr
 
 # baseline comparison
-for omic in omics:
-    omic_dir = fdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/mean_std_corr.tsv', sep='\t', index_col=0, header=[0, 1, 2, 3])
+    metric_df = pd.read_csv(fdir + '/' + str(feature_count) + '.mean_std_corr.tsv', sep='\t', index_col=0, header=[0, 1, 2, 3])
     metric_df = metric_df.stack(level=3).transpose()
     metric_df.columns = metric_df.columns.map('_'.join).str.strip('_')
     metric_df = metric_df.reset_index(names=['dataset', 'method', 'config_label']) 
@@ -131,27 +120,25 @@ for omic in omics:
     
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
+    metric_df = metric_df.drop(columns='prior_top_pct')
     
-    tsv_path = omic_dir + '/mean_std_corr_pval_baseline_vs_prada.tsv'
+    tsv_path = fdir + '/' + str(feature_count) + '.mean_std_corr_pval_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
     max_cols = ['mean_statistic', 'std_statistic']
     min_cols = ['mean_p-value', 'std_p-value']
-    generate_table_image(tsv_path, omic_dir, max_cols, min_cols)
+    generate_table_image(tsv_path, fdir, max_cols, min_cols)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = fdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/mean_std_corr.tsv', sep='\t', index_col=0, header=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(fdir + '/' + str(feature_count) + '.mean_std_corr.tsv', sep='\t', index_col=0, header=[0, 1, 2, 3])
     metric_df = metric_df.stack(level=3).transpose()
     metric_df.columns = metric_df.columns.map('_'.join).str.strip('_')
     metric_df = metric_df.reset_index(names=['dataset', 'method', 'config_label'])
@@ -159,29 +146,27 @@ for omic in omics:
     print(metric_df.head())
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['method', 'prior', 'model_name', 'corr_top_k', 'prior_top_k'])
-    metric_df.to_csv(omic_dir + '/mean_std_corr_data_vs_data+prior.tsv', sep='\t', index=False)
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    metric_df.to_csv(fdir + '/' + str(feature_count) + '.mean_std_corr_data_vs_data+prior.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/mean_std_corr_data_vs_data+prior.tsv'
+    tsv_path = fdir + '/' + str(feature_count) + '.mean_std_corr_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
     max_cols = ['mean_statistic', 'std_statistic']
     min_cols = ['mean_p-value', 'std_p-value']
-    generate_table_image(tsv_path, omic_dir, max_cols, min_cols)
+    generate_table_image(tsv_path, fdir, max_cols, min_cols)
     
-# discriminative_score
-print('discriminative_score')
-# baseline comparison
-for omic in omics:
-    omic_dir = fdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/discriminative_score.tsv', sep='\t', index_col=[0, 1, 2, 3])
+    # discriminative_score
+    print('discriminative_score')
+    # baseline comparison
+
+    metric_df = pd.read_csv(fdir + '/' + str(feature_count) + '.discriminative_score.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=0)
     metric_df.columns = metric_df.columns.map('_'.join)
     
@@ -190,103 +175,92 @@ for omic in omics:
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
     print(metric_df)
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
-    metric_df.to_csv(omic_dir + '/discriminative_baseline_vs_prada.tsv', sep='\t', index=False)
+    metric_df = metric_df.drop(columns='prior_top_pct')
+    metric_df.to_csv(fdir + '/' + str(feature_count) + '.discriminative_baseline_vs_gcvae.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/discriminative_baseline_vs_prada.tsv'
+    tsv_path = fdir + '/' + str(feature_count) + '.discriminative_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=False, all_min=True)
+    generate_table_image(tsv_path, fdir, max_cols=[], min_cols=[], all_max=False, all_min=True)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = fdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/discriminative_score.tsv', sep='\t', index_col=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(fdir + '/' + str(feature_count) + '.discriminative_score.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=0)
     metric_df.columns = metric_df.columns.map('_'.join)
     metric_df = metric_df.reset_index(names=['config_label', 'dataset', 'method']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
     
-    tsv_path = omic_dir + '/discriminative_data_vs_data+prior.tsv'
+    tsv_path = fdir + '/' + str(feature_count) + '.discriminative_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=False, all_min=True)
+    generate_table_image(tsv_path, fdir, max_cols=[], min_cols=[], all_max=False, all_min=True)
     
 # correlation
 
 # baseline comparison
-for omic in omics:
-    omic_dir = cdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/correlation.tsv', sep='\t', index_col=0, header=[0, 1, 2])
+    metric_df = pd.read_csv(cdir + '/' + str(feature_count) + '.correlation.tsv', sep='\t', index_col=0, header=[0, 1, 2])
     metric_df = metric_df.transpose().reset_index(names=['dataset', 'method', 'config_label']) 
     
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
-    metric_df.to_csv(omic_dir + '/correlation_baseline_vs_prada.tsv', sep='\t', index=False)
+    metric_df = metric_df.drop(columns='prior_top_pct')
+    metric_df.to_csv(cdir + '/' + str(feature_count) + '.correlation_baseline_vs_gcvae.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/correlation_baseline_vs_prada.tsv'
+    tsv_path = cdir + '/' + str(feature_count) + '.correlation_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
     max_cols = ['corr_accuracy', 'corr_corr']
     min_cols = ['avg_diff', 'corr_corr_pval']
-    generate_table_image(tsv_path, omic_dir, max_cols, min_cols, all_max=False, all_min=False)
+    generate_table_image(tsv_path, cdir, max_cols, min_cols, all_max=False, all_min=False)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = cdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/correlation.tsv', sep='\t', index_col=0, header=[0, 1, 2])
+    metric_df = pd.read_csv(cdir + '/' + str(feature_count) + '.correlation.tsv', sep='\t', index_col=0, header=[0, 1, 2])
     metric_df = metric_df.transpose().reset_index(names=['dataset', 'method', 'config_label']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    metric_df.to_csv(omic_dir + '/correlation_data_vs_data+prior.tsv', sep='\t', index=False)
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    metric_df.to_csv(cdir + '/' + str(feature_count) + '.correlation_data_vs_data+prior.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/correlation_data_vs_data+prior.tsv'
+    tsv_path = cdir + '/' + str(feature_count) + '.correlation_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
     max_cols = ['corr_accuracy', 'corr_corr']
     min_cols = ['avg_diff', 'corr_corr_pval']
-    generate_table_image(tsv_path, omic_dir, max_cols, min_cols, all_max=False, all_min=False)
+    generate_table_image(tsv_path, cdir, max_cols, min_cols, all_max=False, all_min=False)
 # utility
 # classification
 
 # baseline comparison
-for omic in omics:
-    omic_dir = udir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/classification_utility.tsv', sep='\t', index_col=[0, 1, 2, 3])
+    metric_df = pd.read_csv(udir + '/' + str(feature_count) + '.classification_utility.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=3)
     metric_df.columns = metric_df.columns.map('_'.join)
     print(metric_df.head())
@@ -297,21 +271,18 @@ for omic in omics:
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
     
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
-    metric_df.to_csv(omic_dir + '/classification_baseline_vs_prada.tsv', sep='\t', index=False)
+    metric_df = metric_df.drop(columns='prior_top_pct')
+    metric_df.to_csv(udir + '/' + str(feature_count) + '.classification_baseline_vs_gcvae.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/classification_baseline_vs_prada.tsv'
+    tsv_path = udir + '/' + str(feature_count) + '.classification_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, udir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = udir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/classification_utility.tsv', sep='\t', index_col=[0, 1, 2, 3])
+    metric_df = pd.read_csv(udir + '/' + str(feature_count) + '.classification_utility.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=3)
     metric_df.columns = metric_df.columns.map('_'.join)
     print(metric_df.head())
@@ -319,27 +290,25 @@ for omic in omics:
     metric_df = metric_df.reset_index(names=['dataset', 'method', 'config_label']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    metric_df.to_csv(omic_dir + '/classification_data_vs_data+prior.tsv', sep='\t', index=False)
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    metric_df.to_csv(udir + '/' + str(feature_count) + '.classification_data_vs_data+prior.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/classification_data_vs_data+prior.tsv'
+    tsv_path = udir + '/' + str(feature_count) + '.classification_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, udir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # clustering
 
 # baseline comparison
-for omic in omics:
-    omic_dir = udir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/kmeans_clustering.tsv', sep='\t', index_col=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(udir + '/' + str(feature_count) + '.kmeans_clustering.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=3)
     metric_df.columns = metric_df.columns.map('_'.join)
     print(metric_df.head())
@@ -348,25 +317,23 @@ for omic in omics:
     
     print(metric_df.head())
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
+    metric_df = metric_df.drop(columns='prior_top_pct')
     
-    tsv_path = omic_dir + '/clustering_baseline_vs_prada.tsv'
+    tsv_path = udir + '/' + str(feature_count) + '.clustering_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, udir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = udir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/kmeans_clustering.tsv', sep='\t', index_col=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(udir + '/' + str(feature_count) + '.kmeans_clustering.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=3)
     metric_df.columns = metric_df.columns.map('_'.join)
     print(metric_df.head())
@@ -374,76 +341,68 @@ for omic in omics:
     metric_df = metric_df.reset_index(names=['dataset', 'method', 'config_label']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    metric_df.to_csv(omic_dir + '/clustering_data_vs_data+prior.tsv', sep='\t', index=False)
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    metric_df.to_csv(udir + '/' + str(feature_count) + '.clustering_data_vs_data+prior.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/clustering_data_vs_data+prior.tsv'
+    tsv_path = udir + '/' + str(feature_count) + '.clustering_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, udir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # anova
 
 # baseline comparison
-for omic in omics:
-    omic_dir = udir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/anova_pvalue_corr.tsv', sep='\t', index_col=[0, 1, 2])
+    metric_df = pd.read_csv(udir + '/' + str(feature_count) + '.anova_pvalue_corr.tsv', sep='\t', index_col=[0, 1, 2])
     metric_df = metric_df.reset_index(names=['dataset', 'method', 'config_label']) 
     print(metric_df.head())
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
-    metric_df.to_csv(omic_dir + '/anova_baseline_vs_prada.tsv', sep='\t', index=False)
+    metric_df = metric_df.drop(columns='prior_top_pct')
+    metric_df.to_csv(udir + '/' + str(feature_count) + '.anova_baseline_vs_gcvae.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/anova_baseline_vs_prada.tsv'
+    tsv_path = udir + '/' + str(feature_count) + '.anova_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=['corr'], min_cols=['pvalue'], all_max=False, all_min=False)
+    generate_table_image(tsv_path, udir, max_cols=['corr'], min_cols=['pvalue'], all_max=False, all_min=False)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = udir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/anova_pvalue_corr.tsv', sep='\t', index_col=[0, 1, 2])
+    metric_df = pd.read_csv(udir + '/' + str(feature_count) + '.anova_pvalue_corr.tsv', sep='\t', index_col=[0, 1, 2])
     metric_df = metric_df.reset_index(names=['dataset', 'method', 'config_label']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    metric_df.to_csv(omic_dir + '/anova_data_vs_data+prior.tsv', sep='\t', index=False)
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    metric_df.to_csv(udir + '/' + str(feature_count) + '.anova_data_vs_data+prior.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/anova_data_vs_data+prior.tsv'
+    tsv_path = udir + '/' + str(feature_count) + '.anova_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=['corr'], min_cols=['pvalue'], all_max=False, all_min=False)
+    generate_table_image(tsv_path, udir, max_cols=['corr'], min_cols=['pvalue'], all_max=False, all_min=False)
     
 
 # privacy
 # membership
 
 # baseline comparison
-for omic in omics:
-    omic_dir = pdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/membership_inference.tsv', sep='\t', index_col=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(pdir + '/' + str(feature_count) + '.membership_inference.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=3)
     metric_df = metric_df.droplevel(level=0, axis=1)
     print(metric_df.head())
@@ -452,26 +411,23 @@ for omic in omics:
     
     print(metric_df.head())
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
-    metric_df.to_csv(omic_dir + '/membership_baseline_vs_prada.tsv', sep='\t', index=False)
+    metric_df = metric_df.drop(columns='prior_top_pct')
+    metric_df.to_csv(pdir + '/' + str(feature_count) + '.membership_baseline_vs_gcvae.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/membership_baseline_vs_prada.tsv'
+    tsv_path = pdir + '/' + str(feature_count) + '.membership_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, pdir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = pdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/membership_inference.tsv', sep='\t', index_col=[0, 1, 2, 3])
+    metric_df = pd.read_csv(pdir + '/' + str(feature_count) + '.membership_inference.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=3)
     metric_df = metric_df.droplevel(level=0, axis=1)
     print(metric_df.head())
@@ -479,26 +435,24 @@ for omic in omics:
     metric_df = metric_df.reset_index(names=['dataset', 'method', 'config_label']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
     
-    tsv_path = omic_dir + '/membership_data_vs_data+prior.tsv'
+    tsv_path = pdir + '/' + str(feature_count) + '.membership_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, pdir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # re_identification
 
 # baseline comparison
-for omic in omics:
-    omic_dir = pdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/re_identification.tsv', sep='\t', index_col=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(pdir + '/' + str(feature_count) + '.re_identification.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=3)
     metric_df.columns = metric_df.columns.map('_'.join)
     print(metric_df.head())
@@ -507,26 +461,24 @@ for omic in omics:
     
     print(metric_df.head())
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
-    metric_df.to_csv(omic_dir + '/re_identification_baseline_vs_prada.tsv', sep='\t', index=False)
+    metric_df = metric_df.drop(columns='prior_top_pct')
+    metric_df.to_csv(pdir + '/' + str(feature_count) + '.re_identification_baseline_vs_gcvae.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/re_identification_baseline_vs_prada.tsv'
+    tsv_path = pdir + '/' + str(feature_count) + '.re_identification_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, pdir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = pdir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/re_identification.tsv', sep='\t', index_col=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(pdir + '/' + str(feature_count) + '.re_identification.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df = metric_df.unstack(level=3)
     metric_df.columns = metric_df.columns.map('_'.join)
     print(metric_df.head())
@@ -534,28 +486,26 @@ for omic in omics:
     metric_df = metric_df.reset_index(names=['dataset', 'method', 'config_label']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    metric_df.to_csv(omic_dir + '/re_identification_data_vs_data+prior.tsv', sep='\t', index=False)
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    metric_df.to_csv(pdir + '/' + str(feature_count) + '.re_identification_data_vs_data+prior.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/re_identification_data_vs_data+prior.tsv'
+    tsv_path = pdir + '/' + str(feature_count) + '.re_identification_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, pdir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # augmentation
 # classification
 
 # baseline comparison
-for omic in omics:
-    omic_dir = adir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/augmentated_classification.tsv', sep='\t', index_col=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(adir + '/' + str(feature_count) + '.augmentated_classification.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df['auroc'] = (metric_df['aug_auroc'] > metric_df['exp_auroc']).astype(int)
     metric_df['auprc'] = (metric_df['aug_auprc'] > metric_df['exp_auprc']).astype(int)
     metric_df = metric_df.drop(columns=['exp_auroc', 'aug_auroc', 'exp_auprc', 'aug_auprc'])
@@ -569,26 +519,24 @@ for omic in omics:
     print(metric_df.head())
     metric_df = pd.merge(metric_df, data_config, on='config_label', how='left')
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df[~((metric_df['method'] == 'PRADA') & (metric_df['prior'].isnull()))]
+
     print('metric_df', metric_df.shape)
     print(metric_df)
-    metric_df = metric_df.drop(columns='prior_top_k')
-    metric_df.to_csv(omic_dir + '/classification_baseline_vs_prada.tsv', sep='\t', index=False)
+    metric_df = metric_df.drop(columns='prior_top_pct')
+    metric_df.to_csv(adir + '/' + str(feature_count) + '.classification_baseline_vs_gcvae.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/classification_baseline_vs_prada.tsv'
+    tsv_path = adir + '/' + str(feature_count) + '.classification_baseline_vs_gcvae.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, adir, max_cols=[], min_cols=[], all_max=True, all_min=False)
     
 # data vs data+prior
-for omic in omics:
-    omic_dir = adir + '/' + omic
-    print(omic_dir)
-    metric_df = pd.read_csv(omic_dir + '/augmentated_classification.tsv', sep='\t', index_col=[0, 1, 2, 3])
+
+    metric_df = pd.read_csv(adir + '/' + str(feature_count) + '.augmentated_classification.tsv', sep='\t', index_col=[0, 1, 2, 3])
     metric_df['auroc'] = (metric_df['aug_auroc'] > metric_df['exp_auroc']).astype(int)
     metric_df['auprc'] = (metric_df['aug_auprc'] > metric_df['exp_auprc']).astype(int)
     metric_df = metric_df.drop(columns=['exp_auroc', 'aug_auroc', 'exp_auprc', 'aug_auprc'])
@@ -599,16 +547,16 @@ for omic in omics:
     metric_df = metric_df.reset_index(names=['config_label', 'dataset', 'method']) 
     
     metric_df = pd.merge(metric_df, config_df, on='config_label', how='inner')
-    metric_df.loc[metric_df.prior == 'no-prior', 'prior_top_k'] = 0
+    metric_df.loc[metric_df.prior_top_pct == 0, 'prior_top_pct'] = 0
     
-    prada_df =  metric_df[metric_df.method == 'PRADA']
-    prada_df = prada_df.drop_duplicates(subset=['dataset', 'prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    base_df =  metric_df[metric_df.method != 'PRADA']
-    metric_df = pd.concat([prada_df, base_df], axis=0)
+    gcvae_df =  metric_df[metric_df.method == 'GCVAE']
+    gcvae_df = gcvae_df.drop_duplicates(subset=['dataset', 'method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    base_df =  metric_df[metric_df.method != 'GCVAE']
+    metric_df = pd.concat([gcvae_df, base_df], axis=0)
     
-    metric_df = metric_df.sort_values(by=['prior', 'method', 'model_name', 'corr_top_k', 'prior_top_k'])
-    metric_df.to_csv(omic_dir + '/classification_data_vs_data+prior.tsv', sep='\t', index=False)
+    metric_df = metric_df.sort_values(by=['method', 'model_name', 'corr_top_pct', 'prior_top_pct'])
+    metric_df.to_csv(adir + '/' + str(feature_count) + '.classification_data_vs_data+prior.tsv', sep='\t', index=False)
     
-    tsv_path = omic_dir + '/classification_data_vs_data+prior.tsv'
+    tsv_path = adir + '/' + str(feature_count) + '.classification_data_vs_data+prior.tsv'
     metric_df.to_csv(tsv_path, sep='\t', index=False)
-    generate_table_image(tsv_path, omic_dir, max_cols=[], min_cols=[], all_max=True, all_min=False)
+    generate_table_image(tsv_path, adir, max_cols=[], min_cols=[], all_max=True, all_min=False)

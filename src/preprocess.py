@@ -1,19 +1,19 @@
-# added subparsers
+import os, sys, argparse, dcor
 
-import argparse
 import pandas as pd
-import pytaxonkit
-from pathlib import Path
-import os, sys
-from sklearn.impute import KNNImputer
-from sklearn.preprocessing import StandardScaler
 import numpy as np
 import networkx as nx
-from sklearn.model_selection import train_test_split
+import matplotlib.pyplot as plt
+
+from pathlib import Path
 from math import ceil
-from scipy.stats import spearmanr, pearsonr
-import dcor
 from shutil import rmtree
+
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from scipy.stats import spearmanr, pearsonr
+from scipy.stats import f_oneway
 
 def parse_args():
     parser = argparse.ArgumentParser()
@@ -32,6 +32,9 @@ def parse_args():
                         help="method to impute values",
                         required=True, default=None)
     
+    parser.add_argument("--feature_count", type=int,
+                        help="no. of features to keep (based on least anova p-values)",
+                        required=True, default=None)
     parser.add_argument("--train_pct", type=float,
                         help="percentage of sample for training data",
                         required=True, default=None)
@@ -39,9 +42,6 @@ def parse_args():
                         help="percentage of sample for validation data",
                         required=True, default=None)
     
-    parser.add_argument("--corr_method", type=str, choices=['sp', 'pr'],
-                        help="correlation method to contruct the correlation network",
-                        required=False, default='spearman')
     parser.add_argument("--corr_top_pct", type=float,
                         help="top k edges to consider in the correlation network",
                         required=False, default=None)
@@ -186,12 +186,15 @@ def impute(df, train_df, val_df, test_df, imputation):
     if(imputation == 'knn'):
         return knn_impute(df, train_df, val_df, test_df)    
     
-def normalize(df, train_df, val_df, test_df):
+def row_normalize(df, train_df, val_df, test_df):
     df = df.div(df.sum(axis=1), axis=0) # row normalization
     train_df = train_df.div(train_df.sum(axis=1), axis=0) # row normalization
     val_df = val_df.div(val_df.sum(axis=1), axis=0)
     test_df = test_df.div(test_df.sum(axis=1), axis=0)
     
+    return df, train_df, val_df, test_df
+
+def col_standardize(df, train_df, val_df, test_df):    
     scaler = StandardScaler()
     scaler = scaler.fit(train_df.to_numpy())
     
@@ -213,29 +216,94 @@ def normalize(df, train_df, val_df, test_df):
     
     return df, train_df, val_df, test_df
 
-def preprocess_input(df, train_df, val_df, test_df, train_meta_df, missing_pct, imputation):
+def preprocess_input(df,
+                     train_df,
+                     val_df,
+                     test_df,
+                     train_meta_df,
+                     feature_count,
+                     missing_pct,
+                     imputation):
     valid_cols = set()
+    
+    print('df', df.shape,
+          'train_df', train_df.shape,
+          'val_df', val_df.shape,
+          'test_df', test_df.shape,
+          'train_meta_df', train_meta_df.shape)
+    
     for cohort in train_meta_df.columns:
         cohort_samples = list(train_meta_df[train_meta_df[cohort] == 1].index)
-        print(len(cohort_samples), 'cohort_samples')
         cohort_train_df = train_df.loc[cohort_samples, :]
-        print(cohort_train_df.shape, 'cohort_train_df')
         cohort_mask = cohort_train_df.isnull().mean(axis=0)
         cohort_cols = set(cohort_mask[cohort_mask < missing_pct].index)
         valid_cols.update(cohort_cols)
-        print(len(valid_cols), 'valid_cols')
         
     valid_cols = list(valid_cols)
     valid_cols.sort()
-    print('total', len(valid_cols), 'valid_cols')
+    print(len(valid_cols), 'valid_cols')     
     
     df = df[valid_cols]
     train_df = train_df[valid_cols]
     val_df = val_df[valid_cols]
     test_df = test_df[valid_cols]
     
+    df = df.fillna(0)
+    train_df = train_df.fillna(0)
+    val_df = val_df.fillna(0)
+    test_df = test_df.fillna(0)
+    
+    df, train_df, val_df, test_df = row_normalize(df, train_df, val_df, test_df)
+    print('After first normalization', end='\n')
+    print('df', '\n', df.sum(axis=1))
+    print('train_df', '\n', train_df.sum(axis=1))
+    print('val_df', '\n', val_df.sum(axis=1))
+    print('test_df', '\n', test_df.sum(axis=1))
+    
+    df = df.replace(0, np.nan)
+    train_df = train_df.replace(0, np.nan)
+    val_df = val_df.replace(0, np.nan)
+    test_df = test_df.replace(0, np.nan)
+    
     df, train_df, val_df, test_df = impute(df, train_df, val_df, test_df, imputation)
-    df, train_df, val_df, test_df = normalize(df, train_df, val_df, test_df)
+    print('After imputation', end='\n')
+    print('df', '\n', df.sum(axis=1))
+    print('train_df', '\n', train_df.sum(axis=1))
+    print('val_df', '\n', val_df.sum(axis=1))
+    print('test_df', '\n', test_df.sum(axis=1))
+    
+    df, train_df, val_df, test_df = row_normalize(df, train_df, val_df, test_df)
+    print('After second normalization', end='\n')
+    print('df', '\n', df.sum(axis=1))
+    print('train_df', '\n', train_df.sum(axis=1))
+    print('val_df', '\n', val_df.sum(axis=1))
+    print('test_df', '\n', test_df.sum(axis=1))
+    
+    df, train_df, val_df, test_df = col_standardize(df, train_df, val_df, test_df)
+    cohorts = []
+    for cohort in train_meta_df.columns:
+        cohort_samples = list(train_meta_df[train_meta_df[cohort] == 1].index)
+        cohort_train_df = train_df.loc[cohort_samples, valid_cols]
+        cohorts.append(cohort_train_df.to_numpy())
+    stat, pval = f_oneway(*cohorts, axis=0)
+    print('pval', len(pval))
+    print(pval)
+    anova = pd.DataFrame(zip(valid_cols, stat, pval), columns=['Feature', 'Statistic', 'P-value'])
+    anova = anova.sort_values(by='P-value', ascending=True)
+    anova.to_csv('anova.tsv', sep='\t', index=False)
+    final_cols = list(anova['Feature'][:feature_count])
+    print(len(final_cols), 'final_cols')        
+    
+    df = df[final_cols]
+    train_df = train_df[final_cols]
+    val_df = val_df[final_cols]
+    test_df = test_df[final_cols]
+    
+    print('df', df.shape,
+          'train_df', train_df.shape,
+          'val_df', val_df.shape,
+          'test_df', test_df.shape,
+          'train_meta_df', train_meta_df.shape)
     
     return df, train_df, val_df, test_df
     
@@ -252,8 +320,8 @@ def preprocess(**kwargs):
     condition_df = condition_df.rename(columns={'Study.Group': 'Cohort'})
     condition_df['Cohort'] = condition_df['Cohort'].astype(str)
         
-    train_count = int(kwargs['train_pct'] * condition_df.shape[0])
-    val_count = int(kwargs['val_pct'] * condition_df.shape[0])
+    train_count = int(round(kwargs['train_pct'] * condition_df.shape[0]))
+    val_count = int(round(kwargs['val_pct'] * condition_df.shape[0]))
     
     train_samples, test_samples, train_cohort, test_cohort = train_test_split(list(condition_df.index),
                                                                               list(condition_df.Cohort),
@@ -298,12 +366,13 @@ def preprocess(**kwargs):
           'test_condition_df', test_condition_df.shape)
     
     feature_df, train_feature_df, val_feature_df, test_feature_df = preprocess_input(feature_df,
-                                                                     train_feature_df,
-                                                                     val_feature_df,
-                                                                     test_feature_df,
-                                                                     train_condition_df,
-                                                                     kwargs['missing_pct'],
-                                                                     kwargs['imputation'])
+                                                                                     train_feature_df,
+                                                                                     val_feature_df,
+                                                                                     test_feature_df,
+                                                                                     train_condition_df,
+                                                                                     kwargs['feature_count'],
+                                                                                     kwargs['missing_pct'],
+                                                                                     kwargs['imputation'])
     
     print('train_feature_df', train_feature_df.shape,
           'val_feature_df', val_feature_df.shape,
@@ -319,24 +388,46 @@ def preprocess(**kwargs):
     val_condition_df.to_csv('val_condition.tsv', sep='\t', index=True)
     test_condition_df.to_csv('test_condition.tsv', sep='\t', index=True)
         
-    corr_edges = get_corr_edges(feature_df, kwargs['corr_method'], kwargs['corr_top_pct'])
-    corr_edges.to_csv('corr_edges.tsv', sep='\t', index=False)
+    sp_edges = get_corr_edges(feature_df, 'sp', kwargs['corr_top_pct'])
+    sp_edges.to_csv('sp_edges.tsv', sep='\t', index=False)
+    print('sp_edges', sp_edges.shape)
+    
+    pr_edges = get_corr_edges(feature_df, 'pr', kwargs['corr_top_pct'])
+    pr_edges.to_csv('pr_edges.tsv', sep='\t', index=False)
+    print('pr_edges', pr_edges.shape)
     
     dcov_edges = get_corr_edges(feature_df, 'dcov', kwargs['corr_top_pct'])
     dcov_edges.to_csv('dcov_edges.tsv', sep='\t', index=False)
+    print('dcov_edges', dcov_edges.shape)
     
     dcol_edges = get_corr_edges(feature_df, 'dcol', kwargs['corr_top_pct'])
-    dcol_edges.to_csv('dcol_edges.tsv', sep='\t', index=False)    
+    dcol_edges.to_csv('dcol_edges.tsv', sep='\t', index=False)
+    print('dcol_edges', dcol_edges.shape)
 
     prior_edges = get_prior_edges(kwargs['prior_path'], set(feature_df.columns), kwargs['prior_top_pct'])
     prior_edges.to_csv('prior_edges.tsv', sep='\t', index=False)
+    print('prior_edges', prior_edges.shape)
 
     print('prior_edges duplicates')
     print(prior_edges[prior_edges.Node1 == prior_edges.Node2])
     
-    edges = pd.concat([corr_edges, dcov_edges, dcol_edges, prior_edges], axis=0)
+    edges = pd.concat([sp_edges, pr_edges, dcov_edges, dcol_edges, prior_edges], axis=0)
     edges = edges.drop_duplicates()
     edges.to_csv('edges.tsv', sep='\t', index=False)
+    
+    G = nx.from_pandas_edgelist(edges, 'Node1', 'Node2')
+    print(G.number_of_nodes(), 'nodes', G.number_of_edges(), 'edges')
+    G = G.to_undirected()
+    print(G.number_of_nodes(), 'nodes', G.number_of_edges(), 'edges')
+    
+    print('degree', dict(G.degree()))
+    degrees = [val for (node, val) in G.degree()]
+    plt.hist(degrees)
+    plt.xlabel('Degree')
+    plt.ylabel('Frequency')
+    plt.title('Degree distribution of the undirected sample graph')
+    plt.savefig('degree.png') 
+    plt.close()
     
 def main(args):
     if(os.path.exists(args.out_dir)):

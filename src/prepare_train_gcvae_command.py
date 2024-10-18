@@ -5,15 +5,9 @@ from pathlib import Path
 import warnings
 warnings.filterwarnings("ignore")
 
-base_result_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/Phase-3/GCVAE'
-train_script = '/shared/nas/data/m1/ksarker2/Synthetic/Code/Phase-3/train_gcvae.py'
+base_result_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Manuscript/corr-all/GCVAE'
+train_script = '/shared/nas/data/m1/ksarker2/Synthetic/Code/corr-all/train_gcvae.py'
 command_dir =  base_result_dir + '/command'
-
-'''datasets = [
-    'YACHIDA_CRC_2019',
-    'iHMP_IBDMDB_2019',
-    'MARS_IBS_2020'
-]'''
 
 datasets = ['ST001386']
 
@@ -39,7 +33,7 @@ for dataset in datasets:
         ' --val_feature_path ' + preprocess_dir + '/val_feature.tsv' + \
         ' --val_condition_path ' + preprocess_dir + '/val_condition.tsv' + \
         ' --edge_path ' + preprocess_dir + '/edges.tsv' + \
-        ' --model_name ' + config[5] + \
+        ' --model_name ' + config[6] + \
         ' --syn_sample_count ' + str(syn_sample_count) + \
         ' --out_dir ' + out_dir + \
         ' &> ' + out_dir + '/wrapper.log' + \
@@ -50,3 +44,16 @@ for dataset in datasets:
     fp.close()
 
     os.system('chmod +x ' + filepath)
+
+
+
+
+
+
+
+
+    
+
+
+        
+

@@ -1,47 +1,37 @@
 from pathlib import Path
 from shutil import copy
 
-base_in_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/PRADA'
-#base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/CVAE'
-base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/SMOTE'
-#base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Result/NOISE'
+base_in_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Manuscript/corr-all/GCVAE'
 
-datasets = [
-    'YACHIDA_CRC_2019',
-    'iHMP_IBDMDB_2019',
-    'FRANZOSA_IBD_2019',
-    'ERAWIJANTARI_GASTRIC_CANCER_2020',
-    'MARS_IBS_2020',
-    'KOSTIC_INFANTS_DIABETES_2015',
-    'JACOBS_IBD_FAMILIES_2016',
-    'KIM_ADENOMAS_2020',
-    'SINHA_CRC_2016'
-]
+datasets = ['ST001386']
 
 filenames = [
-    'train_microbiome.tsv',
-    'train_metabolome.tsv',
-    'train_metadata.tsv',
-    'val_microbiome.tsv',
-    'val_metabolome.tsv',
-    'val_metadata.tsv',
-    'test_microbiome.tsv',
-    'test_metabolome.tsv',
-    'test_metadata.tsv',
-    'preprocessed_microbiome.tsv',
-    'preprocessed_metabolome.tsv',
-    'preprocessed_metadata.tsv',
+    'train_feature.tsv',
+    'train_condition.tsv',
+    'val_feature.tsv',
+    'val_condition.tsv',
+    'test_feature.tsv',
+    'test_condition.tsv',
+    'preprocessed_feature.tsv',
+    'preprocessed_condition.tsv',
 ]
 
-for dataset_no in range(len(datasets)):
-    dataset = datasets[dataset_no]
-    print(dataset)
-    out_dir = base_out_dir + '/' + dataset + '/preprocess'
-    Path(out_dir).mkdir(exist_ok=True, parents=True)
-    for filename in filenames:
-        in_path = base_in_dir + '/' + dataset + '/config-1/preprocess/' + filename 
-        out_path = out_dir + '/' + filename
-        print('in_path', in_path)
-        print('out_path', out_path)
-        copy(in_path, out_path)
-    print()
+configs = ['config-1', 'config-13', 'config-25']
+#baselines = ['CVAE', 'NOISE', 'SMOTE']
+baselines = ['NOISE', 'SMOTE']
+
+for baseline in baselines:
+    base_out_dir = '/shared/nas/data/m1/ksarker2/Synthetic/Manuscript/corr-all/' + baseline
+    for dataset_no in range(len(datasets)):
+        dataset = datasets[dataset_no]
+        print(dataset)
+        for config in configs:
+            out_dir = base_out_dir + '/' + dataset + '/' + config + '/preprocess'
+            Path(out_dir).mkdir(exist_ok=True, parents=True)
+            for filename in filenames:
+                in_path = base_in_dir + '/' + dataset + '/' + config + '/preprocess/' + filename 
+                out_path = out_dir + '/' + filename
+                print('in_path', in_path)
+                print('out_path', out_path)
+                copy(in_path, out_path)
+            print()

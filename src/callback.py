@@ -3,7 +3,7 @@ from typing_extensions import override
 import torch
 
 class MultiLossEarlyStopping(Callback):
-    def __init__(self, monitor, min_delta, patience, mode, check_finite):
+    def __init__(self, monitor, min_delta, patience, mode, check_finite, stopping_threshold):
         super().__init__()
         self.mode_dict = {"min": torch.lt, "max": torch.gt}
         self.monitor = monitor
@@ -12,6 +12,7 @@ class MultiLossEarlyStopping(Callback):
         self.patience = dict(zip(monitor, patience))
         self.mode = dict(zip(monitor, mode))
         self.check_finite = dict(zip(monitor, check_finite))
+        self.stopping_threshold = dict(zip(monitor, stopping_threshold))
         
         self.best_score = {}
         self.wait_count = {}
@@ -40,6 +41,11 @@ class MultiLossEarlyStopping(Callback):
             monitor_op = self.mode_dict[self.mode[m]]
             print('current', current, 'best', self.best_score[m], 'monitor_op', monitor_op)
             
+            if(monitor_op(current, self.stopping_threshold[m])):
+                print("Should stop for", m, "(stopping_threshold reached)")
+                should_stop_count += 1
+                continue
+            
             if monitor_op(current - self.min_delta[m], self.best_score[m].to(current.device)):
                 self.best_score[m] = current
                 self.wait_count[m] = 0
@@ -58,7 +64,7 @@ class MultiLossEarlyStopping(Callback):
         if should_stop:
             self.stopped_epoch = trainer.current_epoch
 
-class GradientPrinting(Callback):
+class AnnealerStep(Callback):
     def __init__(self):
         super().__init__()
         
@@ -69,7 +75,16 @@ class GradientPrinting(Callback):
         
     @override
     def on_train_batch_end(self, trainer, pl_module, outputs, batch, batch_idx):
-        print('Printing gradients for epoch', pl_module.current_epoch, 'batch', batch_idx, end='\n')
+        print('Param gradients for epoch', pl_module.current_epoch, 'batch', batch_idx, end='\n')
         for name, param in pl_module.model.named_parameters():
             print(name)
             print(param.grad, end='\n')
+        print()
+        print('Param values for epoch', pl_module.current_epoch, 'batch', batch_idx, end='\n')
+        for name, param in pl_module.model.named_parameters():
+            print(name)
+            print(param, end='\n')
+    
+    @override
+    def on_validation_epoch_end(self, trainer, pl_module):
+        pl_module.annealer.step()

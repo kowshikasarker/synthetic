@@ -10,7 +10,6 @@ class KLLoss(torch.nn.Module):
     
     def forward(self, mean, logvar):
         kl_loss = torch.mean(-0.5 * torch.sum(1 + logvar - mean**2 - logvar.exp(), dim = 1), dim = 0)
-        print('mean', mean.shape, 'logvar', logvar.shape, 'kl_loss', kl_loss.shape)
         return kl_loss
     
 class BCELoss(torch.nn.Module):

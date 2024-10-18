@@ -11,7 +11,7 @@ from typing_extensions import override
 
 from model import CombinedHiddenGCVAE, SeparateHiddenGCVAE
 from loss import KLLoss, BCELoss, Annealer
-from callback import MultiLossEarlyStopping, GradientPrinting
+from callback import MultiLossEarlyStopping, AnnealerStep
 
 import torch
 import torch.nn.functional as F
@@ -23,7 +23,7 @@ from torch_geometric.data import Dataset, Data
 from torch_geometric.transforms import ToUndirected
 
 import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint
+from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import CSVLogger
 
 def parse_args():
@@ -167,7 +167,7 @@ class Synthesizer(pl.LightningModule):
         self.lr = lr
         self.kl_module = KLLoss()
         self.mse_module = torch.nn.MSELoss()
-        self.annealer = Annealer(total_steps=50, cyclical=True, shape='linear')
+        self.annealer = Annealer(total_steps=10, cyclical=True, shape='linear')
         
     def sample_data(self, cohort_pct, sample_count, graph_edges, feature_count):
         assert graph_edges.max() == feature_count - 1
@@ -202,10 +202,6 @@ class Synthesizer(pl.LightningModule):
     def configure_optimizers(self):
         return Adam(self.parameters(),
                     lr=self.lr)
-        '''return RMSprop(self.parameters(),
-                        lr=self.lr,
-                        momentum=0.9,
-                        weight_decay=0.01) # change weight decay'''
     
     def calc_loss(self,
                   pred_feat,
@@ -213,16 +209,34 @@ class Synthesizer(pl.LightningModule):
                   mean,
                   logvar,
                   prefix):
+        
+        print('calc_loss')
+        print('pred_feat', pred_feat.shape, 'true_feat', true_feat.shape)
+        print('mean', mean.shape, 'logvar', logvar.shape)
+        
+        print('pred_feat')
+        print(pred_feat)
+        print('true_feat')
+        print(true_feat)
+        print('mean')
+        print(mean)
+        print('logvar')
+        print(logvar)
+        
+        loss = 0
         loss_dict = {}
         
         kl_loss = self.kl_module(mean, logvar)
+        print('kl_loss', kl_loss, kl_loss.shape)
         loss_dict[prefix + '_kl_loss'] = kl_loss.item()
-        slope, kl_loss = self.annealer(kl_loss/kl_loss.detach())
-        loss_dict[prefix + '_slope'] = slope
-        loss = kl_loss
-        self.annealer.step()
+        
+        if(abs(kl_loss.item()) > 0):
+            slope, kl_loss = self.annealer(kl_loss/kl_loss.detach())
+            loss_dict[prefix + '_slope'] = slope
+        loss += kl_loss
         
         mse_loss = self.mse_module(pred_feat, true_feat)
+        print('mse_loss', mse_loss, mse_loss.shape)
         loss += mse_loss/mse_loss.detach()
         loss_dict[prefix + '_mse_loss'] = mse_loss.item()
             
@@ -236,12 +250,20 @@ class Synthesizer(pl.LightningModule):
     def training_step(self, batch, batch_idx):
         print('training_step')
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
+        print('out', '\n', out)
+        print('batch.feature', '\n', batch.feature)
+        print('mean', '\n', mean)
+        print('logvar', '\n', logvar)
         loss = self.calc_loss(out, batch.feature, mean, logvar, 'train')
         return loss
     
     def validation_step(self, batch, batch_idx):
         print('validation_step')
         z, mean, logvar, out = self.forward(batch.feature, batch.condition, batch.edge_index)
+        print('out', '\n', out)
+        print('batch.feature', '\n', batch.feature)
+        print('mean', '\n', mean)
+        print('logvar', '\n', logvar)
         loss = self.calc_loss(out, batch.feature, mean, logvar, 'val')
         return loss
     
@@ -292,21 +314,23 @@ def generate_synthetic_data(**kwargs):
     print('feature_dim', feature_dim, data.feature.shape)
     print('condition_dim', condition_dim, data.condition.shape)
     
-    hidden_dim = [4]
-    #lr = [1e-9, 1e-7, 1e-5, 1e-3, 1e-1]
-    lr = [1e-1, 1e-10]
-    batch_size = [32]
+    # good result for hidden_dim = 4, lr = 1e-5, batch_size = 256 (both mse_loss and kl_loss decreased)
+    hidden_dim = [4, 8, 12]
+    lr = [1e-4, 1e-5, 1e-6]
+    batch_size = [32, 64, 128]
     
     hparams = list(product(hidden_dim, lr, batch_size))
     hparam_label = ['hparam-'+str(i) for i in range(len(hparams))]
     
-    csv_log_dir = os.getcwd() + '/logs/csv_logs'
-    Path(csv_log_dir).mkdir(parents=True, exist_ok=True)
+    log_dir = os.getcwd() + '/logs'
+    if(os.path.exists(log_dir)):
+        rmtree(log_dir)
+    Path(log_dir).mkdir(parents=True)
     
     hparam_df = pd.DataFrame(hparams,
                              columns=['hidden_dim', 'lr', 'batch_size'],
                              index=hparam_label)
-    hparam_df.to_csv(csv_log_dir + '/hyperparameters.tsv', sep='\t', index=True)
+    hparam_df.to_csv(log_dir + '/hyperparameters.tsv', sep='\t', index=True)
     
     
     for i in range(len(hparam_label)):
@@ -323,41 +347,40 @@ def generate_synthetic_data(**kwargs):
         
         train_loader = DataLoader(train_set,
                                   batch_size=hparam[2],
-                                  shuffle=True) # check shuffle in prediction
+                                  shuffle=False) # check shuffle in prediction
         val_loader = DataLoader(val_set,
                                 batch_size=hparam[2],
                                 shuffle=False)
-        
-        early_stopping = MultiLossEarlyStopping(monitor=['val_kl_loss', 'val_mse_loss'],
-                                                mode=['min', 'min'],
-                                                patience=[5, 5],
-                                                min_delta=[0, 0],
-                                                check_finite=[True, True])
-        gradient_printing = GradientPrinting()
+        early_stopping = EarlyStopping(monitor='val_mse_loss',
+                                       mode='min',
+                                       patience=3,
+                                       min_delta=1e-4,
+                                       check_finite=True,
+                                       stopping_threshold=0)
+        annealer_step = AnnealerStep()
         
         checkpoint_callback = ModelCheckpoint(save_top_k=1,
                                               monitor='val_mse_loss',
                                               mode='min',
                                               auto_insert_metric_name=True)
         
-        hparam_csv_log_dir = csv_log_dir + '/' + hparam_no
-        if(os.path.exists(hparam_csv_log_dir)):
-            rmtree(hparam_csv_log_dir)
+        hparam_log_dir = log_dir + '/' + hparam_no
         
-        csv_logger = CSVLogger(hparam_csv_log_dir, name=None)
+        
+        csv_logger = CSVLogger(hparam_log_dir, name=None)
         
         synthesizer = Synthesizer(kwargs['model_name'],
                                   feature_dim,
                                   condition_dim,
                                   hparam[0],
-                                  hparam[0],
+                                  int(hparam[0] // 2),
                                   hparam[1])
         hparam_df.loc[hparam_no, 'param_count'] = sum(p.numel() for p in synthesizer.model.parameters())
         
-        trainer = pl.Trainer(max_epochs=50, # try different values
-                             #callbacks=[early_stopping,
-                             #           checkpoint_callback],
-                             #callbacks=[gradient_printing],
+        trainer = pl.Trainer(max_epochs=500, # try different values
+                             callbacks=[early_stopping,
+                                        checkpoint_callback,
+                                        annealer_step],
                              log_every_n_steps=1,
                              accelerator="cuda",
                              devices=[get_free_gpu()], # pick the gpu with the max free space -> processes will get distributed across gpus
@@ -373,12 +396,12 @@ def generate_synthetic_data(**kwargs):
                     train_dataloaders=train_loader,
                     val_dataloaders=val_loader)
         
-        metric_path = hparam_csv_log_dir + '/version_0/metrics.csv'
+        metric_path = hparam_log_dir + '/version_0/metrics.csv'
         metric_df = pd.read_csv(metric_path, sep=',')
         
         hparam_df.loc[hparam_no, 'last_epoch'] = metric_df['epoch'].max()
         
-        plot_dir = hparam_csv_log_dir + '/plot'
+        plot_dir = hparam_log_dir + '/plot'
         Path(plot_dir).mkdir(parents=True, exist_ok=True)
         
         metrics = ['loss', 'kl_loss', 'mse_loss']
@@ -434,9 +457,9 @@ def generate_synthetic_data(**kwargs):
         
         os.chdir('..')
         print('\n')
-    hparam_df.to_csv(csv_log_dir + '/hyperparameters.tsv', sep='\t', index=True)
+    hparam_df.to_csv(log_dir + '/hyperparameters.tsv', sep='\t', index=True)
     best_hparam = hparam_df['val_mse_loss'].idxmin()
-    with open(csv_log_dir + '/best_hparam.txt', 'w') as fp:
+    with open(log_dir + '/best_hparam.txt', 'w') as fp:
         fp.write(best_hparam)
     
 def main(args):

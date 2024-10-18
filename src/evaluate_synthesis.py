@@ -15,34 +15,23 @@ from sklearn.utils import shuffle
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--train_mic_path", type=str,
-                        help="path to the train micriobiome data in .tsv format",
+    parser.add_argument("--train_feature_path", type=str,
                         required=True, default=None)
-    parser.add_argument("--train_met_path", type=str,
-                        help="path to the train metabolome data in .tsv format",
-                        required=True, default=None)
-    parser.add_argument("--train_meta_path", type=str,
-                        help="path to the train metadata data in .tsv format",
+    parser.add_argument("--train_condition_path", type=str,
                         required=True, default=None)
     
-    parser.add_argument("--test_mic_path", type=str,
+    parser.add_argument("--test_feature_path", type=str,
                         help="path to the test micriobiome data in .tsv format",
                         required=True, default=None)
-    parser.add_argument("--test_met_path", type=str,
+    parser.add_argument("--test_condition_path", type=str,
                         help="path to the test metabolome data in .tsv format",
                         required=True, default=None)
-    parser.add_argument("--test_meta_path", type=str,
-                        help="path to the test metadata data in .tsv format",
-                        required=True, default=None)
     
-    parser.add_argument("--syn_mic_path", type=str,
+    parser.add_argument("--syn_feature_path", type=str,
                         help="path to the synthetic micriobiome data in .tsv format",
                         required=True, default=None)
-    parser.add_argument("--syn_met_path", type=str,
+    parser.add_argument("--syn_condition_path", type=str,
                         help="path to the synthetic metabolome data in .tsv format",
-                        required=True, default=None)
-    parser.add_argument("--syn_meta_path", type=str,
-                        help="path to the synthetic metadata data in .tsv format",
                         required=True, default=None)
     
     parser.add_argument("--out_dir", type=str,
@@ -68,9 +57,6 @@ def evaluate_mean_std_corr(exp_df, syn_df, out_dir):
     print('df', df.shape)
     df.to_csv(out_dir + '/mean_std.tsv', sep='\t', index=False)
     
-    #mean_corr = exp_mean.corr(syn_mean, method='spearman')
-    #std_corr = exp_std.corr(syn_std, method='spearman')
-    
     mean_corr = spearmanr(exp_mean, syn_mean)
     std_corr = spearmanr(exp_std, syn_std)
     
@@ -80,7 +66,19 @@ def evaluate_mean_std_corr(exp_df, syn_df, out_dir):
         fp.write('std' + '\t' + str(std_corr[0]) + '\t' + str(std_corr[1]))
         
 
-def evaluate_classifier(model, train_x, test_x, train_y, test_y):
+def evaluate_classifier(model_name, train_x, test_x, train_y, test_y):
+    print('evaluate_classifier')
+    print('train_x', train_x.shape, 'train_y', train_y.shape,
+          'test_x', test_x.shape, 'test_y', test_y.shape)
+    assert train_x.shape[1] == test_x.shape[1]
+    models = {
+        'rf': RandomForestClassifier(n_estimators=train_x.shape[0], max_depth=None),
+        'mlp': MLPClassifier(hidden_layer_sizes=[train_x.shape[1]//2]),
+        'gb': GradientBoostingClassifier(n_estimators=train_x.shape[0], max_depth=None),
+        'knn': KNeighborsClassifier(),
+        'nb': GaussianNB()
+    }
+    model = models[model_name]
     binary = True
     if ((len(set(train_y))) > 2):
         binary = False
@@ -138,8 +136,7 @@ def evaluate_discriminative_score(exp_df, syn_df, out_dir):
     records = []
     
     # random forest
-    model = RandomForestClassifier(max_depth=None)
-    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier('rf', train_x, test_x, train_y, test_y)
     records.append({
         'model': 'rf',
         'auroc': auroc,
@@ -147,8 +144,7 @@ def evaluate_discriminative_score(exp_df, syn_df, out_dir):
     })
     
     # multi layer perceptron
-    model = MLPClassifier(hidden_layer_sizes=[train_x.shape[1]//2])
-    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier('mlp', train_x, test_x, train_y, test_y)
     records.append({
         'model': 'mlp',
         'auroc': auroc,
@@ -156,8 +152,7 @@ def evaluate_discriminative_score(exp_df, syn_df, out_dir):
     })
     
     # gradient boosting
-    model = GradientBoostingClassifier(max_depth=None)
-    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier('gb', train_x, test_x, train_y, test_y)
     records.append({
         'model': 'gb',
         'auroc': auroc,
@@ -165,8 +160,7 @@ def evaluate_discriminative_score(exp_df, syn_df, out_dir):
     })
     
     # k nearest neighbors
-    model = KNeighborsClassifier()
-    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier('knn', train_x, test_x, train_y, test_y)
     records.append({
         'model': 'knn',
         'auroc': auroc,
@@ -174,8 +168,7 @@ def evaluate_discriminative_score(exp_df, syn_df, out_dir):
     })
     
     # naive bayes
-    model = GaussianNB()
-    auroc, auprc = evaluate_classifier(model, train_x, test_x, train_y, test_y)
+    auroc, auprc = evaluate_classifier('nb', train_x, test_x, train_y, test_y)
     records.append({
         'model': 'nb',
         'auroc': auroc,
@@ -253,20 +246,20 @@ def evaluate_correlation(exp_df, syn_df, out_dir):
         fp.write('corr_corr' + '\t' + str(res[0]) + '\n')
         fp.write('corr_corr_pval' + '\t' + str(res[1]) + '\n')
         
-def evaluate_utility_for_classifier(model,
+def evaluate_utility_for_classifier(model_name,
                                    exp_train_x, exp_train_y,
                                    syn_train_x, syn_train_y,
                                    exp_syn_train_x, exp_syn_train_y,
                                    syn_exp_train_x, syn_exp_train_y,
                                    exp_test_x, exp_test_y):
     
-    trtr_auroc, trtr_auprc = evaluate_classifier(model, exp_train_x, exp_test_x, exp_train_y, exp_test_y)
-    tstr_auroc, tstr_auprc = evaluate_classifier(model, syn_train_x, exp_test_x, syn_train_y, exp_test_y)
-    tsrtr_auroc, tsrtr_auprc = evaluate_classifier(model, syn_exp_train_x, exp_test_x, syn_exp_train_y, exp_test_y)
-    trstr_auroc, trstr_auprc = evaluate_classifier(model, exp_syn_train_x, exp_test_x, exp_syn_train_y, exp_test_y)
+    trtr_auroc, trtr_auprc = evaluate_classifier(model_name, exp_train_x, exp_test_x, exp_train_y, exp_test_y)
+    tstr_auroc, tstr_auprc = evaluate_classifier(model_name, syn_train_x, exp_test_x, syn_train_y, exp_test_y)
+    tsrtr_auroc, tsrtr_auprc = evaluate_classifier(model_name, syn_exp_train_x, exp_test_x, syn_exp_train_y, exp_test_y)
+    trstr_auroc, trstr_auprc = evaluate_classifier(model_name, exp_syn_train_x, exp_test_x, exp_syn_train_y, exp_test_y)
 
     record = {
-        'model': 'rf',
+        'model': model_name,
         'trtr_auroc': trtr_auroc,
         'trtr_auprc': trtr_auprc,
         'tstr_auroc': tstr_auroc,
@@ -285,20 +278,14 @@ def evaluate_classification_utility(exp_train_x, exp_train_y,
                                     exp_test_x, exp_test_y,
                                     out_dir):
     records = []
-    models = {
-        'rf': RandomForestClassifier(max_depth=None),
-        'mlp': MLPClassifier(hidden_layer_sizes=[exp_train_x.shape[1]//2]),
-        'gb': GradientBoostingClassifier(max_depth=None),
-        'knn': KNeighborsClassifier(),
-        'nb': GaussianNB()
-    }
-    for model_name, model in models.items():
-        record = evaluate_utility_for_classifier(model,
+    model_names = ['rf', 'mlp', 'gb', 'knn', 'nb']
+    for model_name in model_names:
+        record = evaluate_utility_for_classifier(model_name,
                                                  exp_train_x, exp_train_y,
                                                  syn_train_x, syn_train_y,
                                                  exp_syn_train_x, exp_syn_train_y,
                                                  syn_exp_train_x, syn_exp_train_y,
-                                                exp_test_x, exp_test_y)
+                                                 exp_test_x, exp_test_y)
         record['model'] = model_name
         records.append(record)
     df = pd.DataFrame.from_records(records)
@@ -395,24 +382,24 @@ def evaluate_utility(exp_df, syn_df, exp_meta, syn_meta, out_dir):
     exp_syn_train = pd.concat([exp_train, syn_train_half], axis=0)
     syn_exp_train = pd.concat([syn_train, exp_train_half], axis=0)
     
-    exp_y = list(exp_df[meta_col])
+    exp_y = exp_df[meta_col].to_numpy()
     exp_x = exp_df.drop(columns=[meta_col]).to_numpy()
-    syn_y = list(syn_df[meta_col])
+    syn_y = syn_df[meta_col].to_numpy()
     syn_x = syn_df.drop(columns=[meta_col]).to_numpy()
     
-    exp_train_y = list(exp_train[meta_col])
+    exp_train_y = exp_train[meta_col].to_numpy()
     exp_train_x = exp_train.drop(columns=[meta_col]).to_numpy()
     
-    exp_test_y = list(exp_test[meta_col])
+    exp_test_y = exp_test[meta_col].to_numpy()
     exp_test_x = exp_test.drop(columns=[meta_col]).to_numpy()
     
-    syn_train_y = list(syn_train[meta_col])
+    syn_train_y = syn_train[meta_col].to_numpy()
     syn_train_x = syn_train.drop(columns=[meta_col]).to_numpy()
     
-    exp_syn_train_y = list(exp_syn_train[meta_col])
+    exp_syn_train_y = exp_syn_train[meta_col].to_numpy()
     exp_syn_train_x = exp_syn_train.drop(columns=[meta_col]).to_numpy()
     
-    syn_exp_train_y = list(syn_exp_train[meta_col])
+    syn_exp_train_y = syn_exp_train[meta_col].to_numpy()
     syn_exp_train_x = syn_exp_train.drop(columns=[meta_col]).to_numpy()
     
     evaluate_clustering_utility(exp_x, exp_y, syn_x, syn_y, out_dir)
@@ -531,6 +518,7 @@ def evaluate_augmentation(train_df,
                           test_meta,
                           syn_meta,
                           out_dir):
+    
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     
     col_map = dict(zip(train_meta.columns, list(range(train_meta.shape[1]))))
@@ -550,6 +538,8 @@ def evaluate_augmentation(train_df,
     train_syn_df = pd.concat([train_df, syn_df], axis=0)
     train_syn_meta = pd.concat([train_meta, syn_meta], axis=0)
     
+    print('train_syn_df', train_syn_df.shape, 'train_df')
+    
     train_x = train_df.to_numpy()
     train_y = train_meta.to_numpy()
     
@@ -563,51 +553,49 @@ def evaluate_augmentation(train_df,
     test_y = test_meta.to_numpy()
     
     records = []
-    models = {
-        'rf': RandomForestClassifier(max_depth=None),
-        'mlp': MLPClassifier(hidden_layer_sizes=[train_x.shape[1]//2]),
-        'gb': GradientBoostingClassifier(max_depth=None),
-        'knn': KNeighborsClassifier(),
-        'nb': GaussianNB()
-    }
-    for model_name, model in models.items():
-        record = {'model': model_name}        
-        record['exp_auroc'], record['exp_auprc'] = evaluate_classifier(model, train_x, test_x, train_y, test_y)
-        record['aug_auroc'], record['aug_auprc'] = evaluate_classifier(model, train_syn_x, test_x, train_syn_y, test_y)
-        
-        '''record['exp_auroc'] = exp_auroc
-        record['exp_auprc'] = exp_auprc
-        record['aug_auroc'] = aug_auroc
-        record['aug_auprc'] = aug_auprc'''
+    model_names = ['rf', 'mlp', 'gb', 'knn', 'nb']
+    
+    for model_name in model_names:
+        record = {'model': model_name} 
+        record['exp_auroc'], record['exp_auprc'] = evaluate_classifier(model_name, train_x, test_x, train_y, test_y)
+        record['aug_auroc'], record['aug_auprc'] = evaluate_classifier(model_name, train_syn_x, test_x, train_syn_y, test_y)
         records.append(record)
     df = pd.DataFrame.from_records(records)
     df.to_csv(out_dir + '/augmentated_classification.tsv', sep='\t', index=False)
     
 def evaluate(**kwargs):
-    train_mic = pd.read_csv(kwargs['train_mic_path'], sep='\t', index_col='Sample')
-    train_met = pd.read_csv(kwargs['train_met_path'], sep='\t', index_col='Sample')
-    train_meta = pd.read_csv(kwargs['train_meta_path'], sep='\t', index_col='Sample')
-    train_mic_met = pd.concat([train_mic, train_met], axis=1)
+    train_feature = pd.read_csv(kwargs['train_feature_path'], sep='\t', index_col='Sample')
+    train_condition = pd.read_csv(kwargs['train_condition_path'], sep='\t', index_col='Sample')
     
-    test_mic = pd.read_csv(kwargs['test_mic_path'], sep='\t', index_col='Sample')
-    test_met = pd.read_csv(kwargs['test_met_path'], sep='\t', index_col='Sample')
-    test_meta = pd.read_csv(kwargs['test_meta_path'], sep='\t', index_col='Sample')
-    test_mic_met = pd.concat([test_mic, test_met], axis=1)
+    test_feature = pd.read_csv(kwargs['test_feature_path'], sep='\t', index_col='Sample')
+    test_condition = pd.read_csv(kwargs['test_condition_path'], sep='\t', index_col='Sample')
     
-    syn_mic = pd.read_csv(kwargs['syn_mic_path'], sep='\t', index_col='Sample')
-    syn_met = pd.read_csv(kwargs['syn_met_path'], sep='\t', index_col='Sample')
-    syn_meta = pd.read_csv(kwargs['syn_meta_path'], sep='\t', index_col='Sample')
-    syn_mic_met = pd.concat([syn_mic, syn_met], axis=1)
+    syn_feature = pd.read_csv(kwargs['syn_feature_path'], sep='\t', index_col='Sample')
+    syn_condition = pd.read_csv(kwargs['syn_condition_path'], sep='\t', index_col='Sample')
     
+    print('train_feature', train_feature.shape,
+          'train_condition', train_condition.shape,
+          'test_feature', test_feature.shape,
+          'test_condition', test_condition.shape,
+          'syn_feature', syn_feature.shape,
+          'syn_condition', syn_condition.shape,
+          flush=True, end='\n')
     
-    evaluate_substitution(train_mic, test_mic, syn_mic, train_meta, test_meta, syn_meta, os.getcwd() + '/substitution/mic')
-    evaluate_substitution(train_met, test_met, syn_met, train_meta, test_meta, syn_meta, os.getcwd() + '/substitution/met')
-    evaluate_substitution(train_mic_met, test_mic_met, syn_mic_met, train_meta, test_meta, syn_meta, os.getcwd() + '/substitution/mic_met')
+    evaluate_substitution(train_feature,
+                          test_feature,
+                          syn_feature,
+                          train_condition,
+                          test_condition,
+                          syn_condition,
+                          os.getcwd() + '/substitution')
     
-    evaluate_augmentation(train_mic, test_mic, syn_mic, train_meta, test_meta, syn_meta, os.getcwd() + '/augmentation/mic')
-    evaluate_augmentation(train_met, test_met, syn_met, train_meta, test_meta, syn_meta, os.getcwd() + '/augmentation/met')
-    evaluate_augmentation(train_mic_met, test_mic_met, syn_mic_met, train_meta, test_meta, syn_meta, os.getcwd() + '/augmentation/mic_met')
-
+    evaluate_augmentation(train_feature,
+                          test_feature,
+                          syn_feature,
+                          train_condition,
+                          test_condition,
+                          syn_condition,
+                          os.getcwd() + '/augmentation')
 def main(args):
     print("evaluate.py")
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
