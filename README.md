@@ -1,1 +1,1 @@
-# PRADA: An approach to generate PRior Augmented DAta for paired gut microbiome and metabolome
+# Graph-based prior-guided synthetic metabolomic data generation
