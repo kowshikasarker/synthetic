@@ -58,7 +58,7 @@ python3 train_gcvae.py --train_feature_path TRAIN_FEATURE_PATH --train_condition
 ### Baseline: Conditional variational autoencoder (CVAE)
 Trains a conditional variational autoencoder with train data, tunes hyperparameters with validation data and generates synthetic data after training completes.
 ```
-train_cvae.py [-h] --train_feature_path TRAIN_FEATURE_PATH --train_condition_path TRAIN_CONDITION_PATH --val_feature_path VAL_FEATURE_PATH --val_condition_path VAL_CONDITION_PATH --model_name {combined_hidden}
+train_cvae.py --train_feature_path TRAIN_FEATURE_PATH --train_condition_path TRAIN_CONDITION_PATH --val_feature_path VAL_FEATURE_PATH --val_condition_path VAL_CONDITION_PATH --model_name {combined_hidden}
                      --syn_sample_count SYN_SAMPLE_COUNT --out_dir OUT_DIR
 ```
 #### Arguments
@@ -82,7 +82,7 @@ train_cvae.py [-h] --train_feature_path TRAIN_FEATURE_PATH --train_condition_pat
 ### Evaluate
 Evaluates fidelity, correlation, utility and privacy of generated synthetic data.
 ```
-evaluate_substitution.py [-h] --train_feature_path TRAIN_FEATURE_PATH --train_condition_path TRAIN_CONDITION_PATH --test_feature_path TEST_FEATURE_PATH --test_condition_path TEST_CONDITION_PATH --syn_feature_path
+evaluate_substitution.py --train_feature_path TRAIN_FEATURE_PATH --train_condition_path TRAIN_CONDITION_PATH --test_feature_path TEST_FEATURE_PATH --test_condition_path TEST_CONDITION_PATH --syn_feature_path
                                 SYN_FEATURE_PATH --syn_condition_path SYN_CONDITION_PATH --out_dir OUT_DIR
 ```
 #### Arguments
