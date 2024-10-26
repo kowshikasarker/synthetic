@@ -39,7 +39,7 @@ python3 train_gcvae.py --train_feature_path TRAIN_FEATURE_PATH --train_condition
 ```
 #### Arguments
 ```
---train_feature_path TRAIN_FEATURE_PATH
+  --train_feature_path TRAIN_FEATURE_PATH
                         train features in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers and the rest of the columns should contain metabolomic concentrations
   --train_condition_path TRAIN_CONDITION_PATH
                         train condiiton in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers, and the rest of the columns should each denote one disease group and contain
