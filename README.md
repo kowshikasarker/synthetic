@@ -31,3 +31,27 @@ python3 preprocess.py --feature_path FEATURE_PATH --condition_path CONDITION_PAT
                         top percentage of prior edges to use, for every metabolite this percentage of top prior edges are kept based on higehr weights
   --out_dir OUT_DIR     path to the output dir
 ```
+### Our approach: Graph conditional variational autoencoder (GCVAE)
+Trains a graph conditional variational autoencoder with train data, tunes hyperparameters with validation data and generates synthetic data after training completes.
+```
+python3 train_gcvae.py --train_feature_path TRAIN_FEATURE_PATH --train_condition_path TRAIN_CONDITION_PATH --val_feature_path VAL_FEATURE_PATH --val_condition_path VAL_CONDITION_PATH --model_name {combined_hidden}
+                      --syn_sample_count SYN_SAMPLE_COUNT --out_dir OUT_DIR
+```
+#### Arguments
+```
+--train_feature_path TRAIN_FEATURE_PATH
+                        train features in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers and the rest of the columns should contain metabolomic concentrations
+  --train_condition_path TRAIN_CONDITION_PATH
+                        train condiiton in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers, and the rest of the columns should each denote one disease group and contain
+                        either 0 or 1
+  --val_feature_path VAL_FEATURE_PATH
+                        validation features in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers and the rest of the columns should contain metabolomic concentrations
+  --val_condition_path VAL_CONDITION_PATH
+                        validation condiiton in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers, and the rest of the columns should each denote one disease group and contain
+                        either 0 or 1
+  --model_name {combined_hidden}
+                        name of the model architecture
+  --syn_sample_count SYN_SAMPLE_COUNT
+                        count of synthetic samples to generate
+  --out_dir OUT_DIR     path to output dir
+```
