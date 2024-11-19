@@ -1,419 +1,443 @@
-import json, os, sys, torch, argparse
+import os, sys, argparse, dcor
 
-import json, os, sys, torch, argparse
-import numpy as np
 import pandas as pd
+import numpy as np
+import networkx as nx
 import matplotlib.pyplot as plt
-from itertools import product
+
 from pathlib import Path
-from shutil import copyfile, rmtree
-from subprocess import check_output
-from io import StringIO
-from typing_extensions import override
+from math import ceil
+from shutil import rmtree
 
-import torch.nn.functional as F
-from torch.utils.data import Dataset, DataLoader
-from torch.optim import Adam
-
-import pytorch_lightning as pl
-from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
-from pytorch_lightning.loggers import CSVLogger
-
-from model import CVAE
-from loss import KLLoss
-from annealer import Annealer, AnnealerStep
+from sklearn.impute import KNNImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from scipy.stats import spearmanr, pearsonr
+from scipy.stats import f_oneway
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='Preprocesses metabolomic data: discards columns with too many missing values, normalizes rows with row sum, imputes remaining missing values, normalizes rows with row sum again, standardizes columns and selects top columns based on least anova p-values')
-    parser.add_argument("--train_feature_path", type=str,
-                        help="train features in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers and the rest of the columns should contain metabolomic concentrations",
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--feature_path", type=str,
+                        help="path to the features in .tsv format, the first column name should be 'Sample' containing sample identifiers and the rest of the columns should contain metabolomic concentrations",
                         required=True, default=None)
-    parser.add_argument("--train_condition_path", type=str,
-                        help="train condiiton in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers, and the rest of the columns should each denote one disease group and contain either 0 or 1",
-                        required=True, default=None)
-    
-    parser.add_argument("--val_feature_path", type=str,
-                        help="validation features in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers and the rest of the columns should contain metabolomic concentrations",
-                        required=True, default=None)
-    parser.add_argument("--val_condition_path", type=str,
-                        help="validation condiiton in .tsv format after preprocessing, the first column name should be 'Sample' containing sample identifiers, and the rest of the columns should each denote one disease group and contain either 0 or 1",
+    parser.add_argument("--condition_path", type=str,
+                        help="path to the one-hot encoded disease status in .tsv format, the first column name should be 'Sample' containing sample identifiers, and the rest of the columns should each denote one disease group and contain either 0 or 1",
                         required=True, default=None)
     
-    parser.add_argument("--model_name", type=str,
-                        choices=['combined_hidden'],
-                        help="name of the model architecture",
+    parser.add_argument("--missing_pct", type=float,
+                        help="max percentage of missing values to keep feature columns, only columns which have less missing percentage in at least one disease group are kept",
+                        required=True, default=None)
+    parser.add_argument("--imputation", type=str,
+                        choices=['knn'],
+                        help="method to impute values, currently only knn imputation is supported",
                         required=True, default=None)
     
-    parser.add_argument("--syn_sample_count", type=int,
-                        help="count of synthetic samples to generate",
+    parser.add_argument("--feature_count", type=int, 
+                        help="no. of metabolites to keep based on the least anova p-values across disease groups",
                         required=True, default=None)
+    parser.add_argument("--train_pct", type=float,
+                        help="percentage of sample for training data, used to train the generative model",
+                        required=True, default=None)
+    parser.add_argument("--val_pct", type=float,
+                        help="percentage of sample for validation data, used to tune hyperparameters of the generative model",
+                        required=True, default=None)
+    
+    parser.add_argument("--corr_method", type=str, nargs='+',
+                        choices=['sp', 'pr', 'dcov', 'dcol'],
+                        help="corr measure(s) to use in constructing correlation graph for samples, needs at least one method",
+                        required=False, default=None)
+    parser.add_argument("--corr_top_pct", type=float,
+                        help="top percentage of correlation edges to use, for every metabolite this percentage of top correlated metabolites are conencted with correlation edges",
+                        required=False, default=None)
+    
+    parser.add_argument("--prior_path", type=str,
+                        help="path to prior edges in .tsv format, should contain three columns, the first two contianing metabolites and the third column containing the weight of the prior connection",
+                        required=False, default=None)
+    parser.add_argument("--prior_top_pct", type=float,
+                        help="top percentage of prior edges to use, for every metabolite this percentage of top prior edges are kept based on higehr weights",
+                        required=False, default=None)
     
     parser.add_argument("--out_dir", type=str,
-                        help="path to output dir",
+                        help="path to the output dir",
                         required=True, default=None)
+    
     args = parser.parse_args()
     return args
+    
+    
+def get_prior_edges(prior_path, node_set, prior_top_pct):
+    print('get_prior_edges')
+    print('node_set', node_set)
+    df = pd.read_csv(prior_path, sep='\t')
+    df.columns = ['Node1', 'Node2', 'Weight']
+    df['Node1'] = 'feat:' + df['Node1']
+    df['Node2'] = 'feat:' + df['Node2']
+    df = df[(df['Node1'].isin(node_set)) & (df['Node2'].isin(node_set))]
 
-class CVAEDataset(Dataset):
-    def __init__(self, feature_path, condition_path):
-        self.feature_df = pd.read_csv(feature_path, sep='\t', index_col='Sample')
-        self.condition_df = pd.read_csv(condition_path, sep='\t', index_col='Sample')
-        
-        print('self.feature_df', self.feature_df)
-        print('self.condition_df', self.condition_df)
-        
-        self.feature_names = list(self.feature_df.columns)
-        self.cohort_names = list(self.condition_df.columns)
-        
-        self.length = self.condition_df.shape[0]
-        self.samples = list(self.condition_df.index)
-        
-        cohort_pct = np.sum(self.condition_df.to_numpy(), axis=0)
-        cohort_pct = cohort_pct / np.sum(cohort_pct)
-        self.cohort_pct = cohort_pct
-        print('self.cohort_pct', self.cohort_pct)
+    prior_top_cnt = ceil(len(set(df['Node1']).union(set(df['Node2']))) * prior_top_pct)
+    print('prior_top_cnt', prior_top_cnt)
 
-    def __len__(self):
-        return self.length
+    rev_df = df.copy()
+    rev_df[['Node1', 'Node2']] = rev_df[['Node2', 'Node1']]
+    df = pd.concat([df, rev_df], axis=0)
+    df = df.drop_duplicates(subset=['Node1', 'Node2'])
 
-    def __getitem__(self, idx):
-        sample = self.samples[idx]
-        
-        feature = self.feature_df.loc[sample, self.feature_names]
-        feature = torch.from_numpy(feature.to_numpy()).float()
-        
-        condition = self.condition_df.loc[sample, self.cohort_names]
-        condition = torch.from_numpy(condition.to_numpy()).float()
-        return {
-            'feature': feature,
-            'condition': condition,
-            'sample': sample
-        }
+    df = df.sort_values(by='Weight', ascending=False)
+    df = df.groupby('Node1').head(prior_top_cnt).reset_index(drop=True)
+    df = df.drop(columns='Weight')
+    df = pd.DataFrame(np.sort(df.to_numpy(), axis=1),
+                            columns=df.columns,
+                            index=df.index)
+    df = df.drop_duplicates()
+    return df
 
-class Synthesizer(pl.LightningModule):
-    def __init__(self,
-                 model_name,
-                 feature_dim,
-                 condition_dim,
-                 hidden_dim,
-                 latent_dim,
-                 lr):
-        super(Synthesizer, self).__init__()
-        self.save_hyperparameters()
-        model_map = {
-            'combined_hidden': CVAE,
-        }
-        loss_map = {
-            'kl': KLLoss,
-            'mse': torch.nn.MSELoss,
-        }
-        self.model = model_map[model_name](feature_dim, condition_dim, hidden_dim, latent_dim)
-        print('self.model', self.model)
-        self.feature_dim = feature_dim
-        self.condition_dim = condition_dim
-        self.hidden_dim = hidden_dim
-        self.latent_dim = latent_dim
-        self.lr = lr
-        self.kl_module = KLLoss()
-        self.mse_module = torch.nn.MSELoss()
-        self.annealer = Annealer(total_steps=10, cyclical=True, shape='linear')
-        
-        
-    def sample_data_batch(self, cohort_pct, sample_count):       
-        cohort_count = np.round(np.multiply(cohort_pct, sample_count)).astype(int)
-        cohort = np.zeros(shape=(np.sum(cohort_count), cohort_count.size))
-        past_samples = 0
-        for cohort_i in range(cohort_count.size):
-            cohort[past_samples: past_samples+cohort_count[cohort_i], cohort_i] = 1
-            past_samples += cohort_count[cohort_i]
-        condition = torch.from_numpy(cohort).float()
-        condition = condition.to(self.device)
-        z, samples = self.model.sample(condition)
-        return condition, z, samples
+def get_corr_edges(feature_df, corr_method, corr_top_pct):
+    # smaller value means greater dependence/correlation
+    # takes smallest connections
     
-    def sample_data(self, cohort_pct, sample_count):
-        batch_max_size = 64
-        batch_condition = []
-        batch_z = []
-        batch_samples = []
-        
-        batch_sizes = [batch_max_size] * (sample_count // batch_max_size) + [sample_count % batch_max_size]
-        
-        for batch_size in batch_sizes:
-            condition, z, samples = self.sample_data_batch(cohort_pct, batch_size)
-            batch_condition.append(condition)
-            batch_z.append(z)
-            batch_samples.append(samples)
-            
-        
-        condition = torch.cat(batch_condition, 0)
-        z = torch.cat(batch_z, 0)
-        samples = torch.cat(batch_samples, 0)
-        
-        return condition, z, samples
-                
-    def forward(self, feature, condition):
-        feature = feature.to(self.device)
-        condition = condition.to(self.device)
-        print('feature', feature.shape, 'condition', condition.shape)
-        return self.model(feature, condition)
+    assert corr_method in ('sp', 'pr', 'dcol', 'dcov')
     
-    def configure_optimizers(self):
-        return Adam(self.parameters(),
-                    lr=self.lr)
+    print('get_corr_edges')
+    print('corr_method', corr_method, flush=True)
     
-    def calc_loss(self,
-                  pred_feat,
-                  true_feat,
-                  mean,
-                  logvar,
-                  prefix):
-        
-        print('calc_loss')
-        print('pred_feat', pred_feat.shape, 'true_feat', true_feat.shape)
-        print('mean', mean.shape, 'logvar', logvar.shape)
-        
-        print('pred_feat')
-        print(pred_feat)
-        print('true_feat')
-        print(true_feat)
-        print('mean')
-        print(mean)
-        print('logvar')
-        print(logvar)
-        
-        loss = 0
-        loss_dict = {}
-        
-        kl_loss = self.kl_module(mean, logvar)
-        print('kl_loss', kl_loss, kl_loss.shape)
-        loss_dict[prefix + '_kl_loss'] = kl_loss.item()
-        
-        if(abs(kl_loss.item()) > 0):
-            slope, kl_loss = self.annealer(kl_loss/kl_loss.detach())
-            loss_dict[prefix + '_slope'] = slope
-        loss += kl_loss
-        
-        mse_loss = self.mse_module(pred_feat, true_feat)
-        print('mse_loss', mse_loss, mse_loss.shape)
-        loss += mse_loss/mse_loss.detach()
-        loss_dict[prefix + '_mse_loss'] = mse_loss.item()
-            
-        loss_dict[prefix + '_loss'] = loss.item()
-        
-        print('loss_dict', loss_dict)
-        self.log_dict(loss_dict, on_step=False, on_epoch=True)
-        return loss
-            
+    def dcov_corr(a, b):
+        print('dcov_corr', flush=True)
+        return dcor.distance_covariance(a, b)
     
-    def training_step(self, batch, batch_idx):
-        print('training_step')
-        z, mean, logvar, out = self.forward(batch['feature'], batch['condition'])
-        loss = self.calc_loss(out, batch['feature'], mean, logvar, 'train')
-        return loss
+    def dcol_corr(a, b):
+        print('dcol_corr', flush=True)
+        df = pd.DataFrame(zip(a, b), columns=['a', 'b'])
+        
+        df = df.sort_values(by='a')
+        b1 = df.iloc[:-1, :]['b'].to_numpy()
+        b2 = df.iloc[1:, :]['b'].to_numpy()
+        print('b1', b1.shape, 'b2', b2.shape)
+        b_dist = np.subtract(b2, b1)
+        b_dist = np.abs(b_dist)
+        b_dist = np.mean(b_dist)
+        return b_dist
     
-    def validation_step(self, batch, batch_idx):
-        print('validation_step')
-        z, mean, logvar, out = self.forward(batch['feature'], batch['condition'])
-        loss = self.calc_loss(out, batch['feature'], mean, logvar, 'val')
-        return loss
+    def sp_corr(a, b):
+        print('sp_corr', flush=True)
+        return -abs(spearmanr(a, b)[0])
     
-def plot_metric(train_x, val_x, train_y, val_y, xlabel, ylabel, title, png_path):
-    plt.plot(train_x, train_y, label='Train')
-    plt.plot(val_x, val_y, label='Val')
-    plt.xlabel(xlabel)
-    plt.ylabel(ylabel)
-    plt.legend()
-    plt.title(title)
-    plt.legend()
-    plt.savefig(png_path)
+    def pr_corr(a, b):
+        print('pr_corr', flush=True)
+        return -abs(pearsonr(a, b)[0])
+    
+    corr_func = {
+        'sp': sp_corr,
+        'pr': pr_corr,
+        'dcov': dcov_corr,
+        'dcol': dcol_corr
+    }
+    
+    
+    pairwise_corr = []
+    
+    cols = list(feature_df.columns)    
+    func = corr_func[corr_method]
+    for i in range(len(cols)):
+        row = []
+        for j in range(len(cols)):
+            print('i', i, 'j', j, flush=True)
+            if(i == j):
+                row.append(np.inf)
+            else:
+                row.append(func(feature_df[cols[i]].to_numpy(), feature_df[cols[j]].to_numpy()))
+        pairwise_corr.append(row)
+    corr_df = pd.DataFrame(pairwise_corr, index=cols, columns=cols)
+    corr_df.to_csv(corr_method + '_correlation.tsv', sep='\t', index=True)
+    
+    corr_top_cnt = ceil(corr_top_pct * feature_df.shape[1])
+    print('corr_top_cnt', corr_top_cnt, flush=True)
+    
+    top_cols = ['Top-' + str(i) for i in range(1, corr_top_cnt+1)]
+    top_corr = pd.DataFrame(corr_df.apply(lambda x: x.nsmallest(corr_top_cnt).index.astype(str).tolist(), axis=1).tolist(), 
+                               columns=top_cols, index=corr_df.index)
+    top_corr = top_corr.stack()
+    top_corr = top_corr.droplevel(axis=0, level=1).reset_index()
+    top_corr.columns = ['Node1', 'Node2']
+    top_corr = pd.DataFrame(np.sort(top_corr.to_numpy(), axis=1),
+                            columns=top_corr.columns,
+                            index=top_corr.index)
+    # the sorting is done so that duplicate edges like (Node1, Node2) and (Node2, Node1) become identical and later gets removed by drop_duplicates
+    top_corr = top_corr.drop_duplicates()
+    loop = top_corr[top_corr['Node1'] == top_corr['Node2']]
+    assert loop.empty
+    return top_corr
+
+def knn_impute(df, train_df, val_df, test_df):
+    imputer = KNNImputer()
+    imputer = imputer.fit(train_df.to_numpy())
+    
+    df = pd.DataFrame(imputer.transform(df.to_numpy()),
+                      columns=df.columns,
+                      index=df.index)
+    
+    train_df = pd.DataFrame(imputer.transform(train_df.to_numpy()),
+                      columns=train_df.columns,
+                      index=train_df.index)
+    
+    val_df = pd.DataFrame(imputer.transform(val_df.to_numpy()),
+                      columns=val_df.columns,
+                      index=val_df.index)
+    
+    test_df = pd.DataFrame(imputer.transform(test_df.to_numpy()),
+                      columns=test_df.columns,
+                      index=test_df.index)
+    
+    return df, train_df, val_df, test_df
+
+def impute(df, train_df, val_df, test_df, imputation):
+    if(imputation == 'knn'):
+        return knn_impute(df, train_df, val_df, test_df)    
+    
+def row_normalize(df, train_df, val_df, test_df):
+    df = df.div(df.sum(axis=1), axis=0) # row normalization
+    train_df = train_df.div(train_df.sum(axis=1), axis=0) # row normalization
+    val_df = val_df.div(val_df.sum(axis=1), axis=0)
+    test_df = test_df.div(test_df.sum(axis=1), axis=0)
+    
+    return df, train_df, val_df, test_df
+
+def col_standardize(df, train_df, val_df, test_df):    
+    scaler = StandardScaler()
+    scaler = scaler.fit(train_df.to_numpy())
+    
+    df = pd.DataFrame(scaler.transform(df.to_numpy()),
+                      columns=df.columns,
+                      index=df.index)
+    
+    train_df = pd.DataFrame(scaler.transform(train_df.to_numpy()),
+                            columns=train_df.columns,
+                            index=train_df.index)
+    
+    val_df = pd.DataFrame(scaler.transform(val_df.to_numpy()),
+                          columns=val_df.columns,
+                          index=val_df.index)
+    
+    test_df = pd.DataFrame(scaler.transform(test_df.to_numpy()),
+                          columns=test_df.columns,
+                          index=test_df.index)
+    
+    return df, train_df, val_df, test_df
+
+def preprocess_input(df,
+                     train_df,
+                     val_df,
+                     test_df,
+                     train_meta_df,
+                     feature_count,
+                     missing_pct,
+                     imputation):
+    valid_cols = set()
+    
+    print('df', df.shape,
+          'train_df', train_df.shape,
+          'val_df', val_df.shape,
+          'test_df', test_df.shape,
+          'train_meta_df', train_meta_df.shape)
+    
+    for cohort in train_meta_df.columns:
+        cohort_samples = list(train_meta_df[train_meta_df[cohort] == 1].index)
+        cohort_train_df = train_df.loc[cohort_samples, :]
+        cohort_mask = cohort_train_df.isnull().mean(axis=0)
+        cohort_cols = set(cohort_mask[cohort_mask < missing_pct].index)
+        valid_cols.update(cohort_cols)
+        
+    valid_cols = list(valid_cols)
+    valid_cols.sort()
+    print(len(valid_cols), 'valid_cols')     
+    
+    df = df[valid_cols]
+    train_df = train_df[valid_cols]
+    val_df = val_df[valid_cols]
+    test_df = test_df[valid_cols]
+    
+    df = df.fillna(0)
+    train_df = train_df.fillna(0)
+    val_df = val_df.fillna(0)
+    test_df = test_df.fillna(0)
+    
+    df, train_df, val_df, test_df = row_normalize(df, train_df, val_df, test_df)
+    print('After first normalization', end='\n')
+    print('df', '\n', df.sum(axis=1))
+    print('train_df', '\n', train_df.sum(axis=1))
+    print('val_df', '\n', val_df.sum(axis=1))
+    print('test_df', '\n', test_df.sum(axis=1))
+    
+    df = df.replace(0, np.nan)
+    train_df = train_df.replace(0, np.nan)
+    val_df = val_df.replace(0, np.nan)
+    test_df = test_df.replace(0, np.nan)
+    
+    df, train_df, val_df, test_df = impute(df, train_df, val_df, test_df, imputation)
+    print('After imputation', end='\n')
+    print('df', '\n', df.sum(axis=1))
+    print('train_df', '\n', train_df.sum(axis=1))
+    print('val_df', '\n', val_df.sum(axis=1))
+    print('test_df', '\n', test_df.sum(axis=1))
+    
+    df, train_df, val_df, test_df = row_normalize(df, train_df, val_df, test_df)
+    print('After second normalization', end='\n')
+    print('df', '\n', df.sum(axis=1))
+    print('train_df', '\n', train_df.sum(axis=1))
+    print('val_df', '\n', val_df.sum(axis=1))
+    print('test_df', '\n', test_df.sum(axis=1))
+    
+    df, train_df, val_df, test_df = col_standardize(df, train_df, val_df, test_df)
+    
+    cohorts = []
+    for cohort in train_meta_df.columns:
+        cohort_samples = list(train_meta_df[train_meta_df[cohort] == 1].index)
+        cohort_train_df = train_df.loc[cohort_samples, valid_cols]
+        cohorts.append(cohort_train_df.to_numpy())
+    stat, pval = f_oneway(*cohorts, axis=0)
+    print('pval', len(pval))
+    print(pval)
+    anova = pd.DataFrame(zip(valid_cols, stat, pval), columns=['Feature', 'Statistic', 'P-value'])
+    anova = anova.sort_values(by='P-value', ascending=True)
+    anova.to_csv('anova.tsv', sep='\t', index=False)
+    final_cols = list(anova['Feature'])[:feature_count]
+    print(len(final_cols), 'final_cols')        
+    
+    df = df[final_cols]
+    train_df = train_df[final_cols]
+    val_df = val_df[final_cols]
+    test_df = test_df[final_cols]
+    
+    print('df', df.shape,
+          'train_df', train_df.shape,
+          'val_df', val_df.shape,
+          'test_df', test_df.shape,
+          'train_meta_df', train_meta_df.shape)
+    
+    return df, train_df, val_df, test_df
+    
+def preprocess(**kwargs):
+    feature_df = pd.read_csv(kwargs['feature_path'], sep='\t', index_col='Sample')
+    feature_df = feature_df.add_prefix('feat:', axis=1)
+    feature_df.index = feature_df.index.map(str)
+    feature_df = feature_df.add_prefix('sample:', axis=0)
+    feature_df = feature_df.replace(0, np.nan)
+    
+    condition_df = pd.read_csv(kwargs['condition_path'], sep='\t', index_col='Sample', usecols=['Sample', 'Study.Group'])
+    condition_df.index = condition_df.index.map(str)
+    condition_df = condition_df.add_prefix('sample:', axis=0)
+    condition_df = condition_df.rename(columns={'Study.Group': 'Cohort'})
+    condition_df['Cohort'] = condition_df['Cohort'].astype(str)
+        
+    train_count = int(round(kwargs['train_pct'] * condition_df.shape[0]))
+    val_count = int(round(kwargs['val_pct'] * condition_df.shape[0]))
+    
+    train_samples, test_samples, train_cohort, test_cohort = train_test_split(list(condition_df.index),
+                                                                              list(condition_df.Cohort),
+                                                                              train_size=train_count,
+                                                                              stratify=list(condition_df.Cohort),
+                                                                              random_state=0)
+    val_samples, test_samples, val_cohort, test_cohort = train_test_split(test_samples,
+                                                                          test_cohort,
+                                                                          train_size=val_count,
+                                                                          stratify=test_cohort,
+                                                                          random_state=0)
+    
+    print(len(train_samples), 'train_samples', len(val_samples), 'val_samples', len(test_samples), 'test_samples')
+    
+    print('train_cohort')
+    print(pd.Series(train_cohort).value_counts())
+    
+    print('val_cohort')
+    print(pd.Series(val_cohort).value_counts())
+    
+    print('test_cohort')
+    print(pd.Series(test_cohort).value_counts())
+    
+    train_feature_df = feature_df.loc[train_samples, :]
+    val_feature_df = feature_df.loc[val_samples, :]
+    test_feature_df = feature_df.loc[test_samples, :]
+    
+    print('train_feature_df', train_feature_df.shape,
+          'val_feature_df', val_feature_df.shape,
+          'test_feature_df', test_feature_df.shape)
+    
+    condition_df = pd.get_dummies(condition_df).astype(int)
+    
+    print('condition_df', condition_df.head())
+    
+    train_condition_df = condition_df.loc[train_samples, :]
+    val_condition_df = condition_df.loc[val_samples, :]
+    test_condition_df = condition_df.loc[test_samples, :]
+    
+    print('train_condition_df', train_condition_df.shape,
+          'val_condition_df', val_condition_df.shape,
+          'test_condition_df', test_condition_df.shape)
+    
+    feature_df, train_feature_df, val_feature_df, test_feature_df = preprocess_input(feature_df,
+                                                                                     train_feature_df,
+                                                                                     val_feature_df,
+                                                                                     test_feature_df,
+                                                                                     train_condition_df,
+                                                                                     kwargs['feature_count'],
+                                                                                     kwargs['missing_pct'],
+                                                                                     kwargs['imputation'])
+    
+    print('train_feature_df', train_feature_df.shape,
+          'val_feature_df', val_feature_df.shape,
+          'test_feature_df', test_feature_df.shape)
+    
+    feature_df.to_csv('preprocessed_feature.tsv', sep='\t', index=True)
+    train_feature_df.to_csv('train_feature.tsv', sep='\t', index=True)
+    val_feature_df.to_csv('val_feature.tsv', sep='\t', index=True)
+    test_feature_df.to_csv('test_feature.tsv', sep='\t', index=True)
+    
+    condition_df.to_csv('preprocessed_condition.tsv', sep='\t', index=True)
+    train_condition_df.to_csv('train_condition.tsv', sep='\t', index=True)
+    val_condition_df.to_csv('val_condition.tsv', sep='\t', index=True)
+    test_condition_df.to_csv('test_condition.tsv', sep='\t', index=True)
+    
+    edges = []
+    
+    for corr_method in kwargs['corr_method']:
+        corr_edges = get_corr_edges(feature_df, corr_method, kwargs['corr_top_pct'])
+        edges.append(corr_edges)
+        corr_edges['edge_type'] = corr_method
+        corr_edges.to_csv(corr_method + '_edges.tsv', sep='\t', index=False)
+        print(corr_method + '_edges', corr_edges.shape)
+
+    if (kwargs['prior_top_pct'] > 0):
+        prior_edges = get_prior_edges(kwargs['prior_path'], set(feature_df.columns), kwargs['prior_top_pct'])
+        edges.append(prior_edges)
+        prior_edges['edge_type'] = 'prior'
+        prior_edges.to_csv('prior_edges.tsv', sep='\t', index=False)
+        print('prior_edges', prior_edges.shape)
+
+        print('prior_edges duplicates')
+        print(prior_edges[prior_edges.Node1 == prior_edges.Node2])
+    
+    edges = pd.concat(edges, axis=0)
+    edges = edges.drop_duplicates()
+    edges.to_csv('edges.tsv', sep='\t', index=False)
+    
+    G = nx.from_pandas_edgelist(edges, 'Node1', 'Node2')
+    print(G.number_of_nodes(), 'nodes', G.number_of_edges(), 'edges')
+    G = G.to_undirected()
+    print(G.number_of_nodes(), 'nodes', G.number_of_edges(), 'edges')
+    
+    print('degree', dict(G.degree()))
+    degrees = [val for (node, val) in G.degree()]
+    plt.hist(degrees)
+    plt.xlabel('Degree')
+    plt.ylabel('Frequency')
+    plt.title('Degree distribution of the undirected sample graph')
+    plt.savefig('degree.png') 
     plt.close()
-
-def get_free_gpu():
-    gpu_stats = check_output(["nvidia-smi", "--format=csv", "--query-gpu=memory.used,memory.free"])
-    gpu_stats = gpu_stats.decode("utf-8")
-    gpu_df = pd.read_csv(StringIO(gpu_stats),
-                         names=['memory.used', 'memory.free'],
-                         skiprows=1)
-    gpu_df.to_csv('gpu_memory.tsv', sep='\t')
-    gpu_df['memory.used'] = gpu_df['memory.used'].str.replace(" MiB", "").astype(int)
-    gpu_df['memory.free'] = gpu_df['memory.free'].str.replace(" MiB", "").astype(int)
-    print('GPU usage:\n{}'.format(gpu_df))
-    gpu_id = gpu_df['memory.free'].idxmax()
-    print('Returning GPU{} with {} free MiB'.format(gpu_id, gpu_df.iloc[gpu_id]['memory.free']))
-    return gpu_id  
-
-def generate_synthetic_data(train_feature_path,
-                            train_condition_path,
-                            val_feature_path,
-                            val_condition_path,
-                            model_name,
-                            syn_sample_count):
-    
-    train_set = CVAEDataset(train_feature_path,
-                            train_condition_path)
-    val_set = CVAEDataset(val_feature_path,
-                          val_condition_path)
-    
-    print('train_set', len(train_set),
-          'val_set', len(val_set))
-    
-    data = train_set[0]
-    feature_dim = data['feature'].shape[0]
-    condition_dim = data['condition'].shape[0]
-    
-    print('feature_dim', feature_dim)
-    print('condition_dim', condition_dim)
-    
-    hidden_dim = [4, 8]
-    lr = [1e-4, 1e-5, 1e-6]
-    batch_size = [128, 256]
-    
-    hparams = list(product(hidden_dim, lr, batch_size))
-    hparam_label = ['hparam-'+str(i) for i in range(len(hparams))]
-    
-    log_dir = os.getcwd() + '/logs'
-    Path(log_dir).mkdir(parents=True, exist_ok=True)
-    
-    hparam_df = pd.DataFrame(hparams,
-                             columns=['hidden_dim', 'lr', 'batch_size'],
-                             index=hparam_label)
-    
-    for i in range(len(hparam_label)):
-        hparam_no = hparam_label[i]
-        hparam = hparams[i]
-        print(hparam_no, hparam)
-        
-        if(os.path.exists(hparam_no)):
-            rmtree(hparam_no)
-            
-        Path(hparam_no).mkdir(parents=True)
-        os.chdir(hparam_no)
-        
-        train_loader = DataLoader(train_set,
-                                  batch_size=hparam[2],
-                                  shuffle=True) # check shuffle in prediction
-        val_loader = DataLoader(val_set,
-                                batch_size=hparam[2],
-                                shuffle=False)
-        
-        early_stopping = EarlyStopping(monitor='val_mse_loss',
-                                       mode='min',
-                                       patience=3,
-                                       min_delta=1e-4,
-                                       check_finite=True,
-                                       stopping_threshold=0)
-        
-        annealer_step = AnnealerStep()
-        
-        checkpoint_callback = ModelCheckpoint(save_top_k=1,
-                                              monitor='val_mse_loss',
-                                              mode='min',
-                                              auto_insert_metric_name=True)
-        
-        hparam_log_dir = log_dir + '/' + hparam_no
-        if(os.path.exists(hparam_log_dir)):
-            rmtree(hparam_log_dir)
-        
-        csv_logger = CSVLogger(hparam_log_dir, name=None)
-        
-        synthesizer = Synthesizer(model_name,
-                                  feature_dim,
-                                  condition_dim,
-                                  hparam[0],
-                                  int(hparam[0]//2),
-                                  hparam[1])
-        hparam_df.loc[hparam_no, 'param_count'] = sum(p.numel() for p in synthesizer.model.parameters())
-        
-        trainer = pl.Trainer(max_epochs=100, # try different values
-                             callbacks=[early_stopping,
-                                        checkpoint_callback,
-                                        annealer_step],
-                             log_every_n_steps=1,
-                             accelerator="cuda",
-                             devices=[get_free_gpu()],
-                             enable_checkpointing=True,
-                             logger=[csv_logger],
-                             check_val_every_n_epoch=1,
-                             val_check_interval=1.0,
-                             enable_progress_bar=False,
-                             num_sanity_val_steps=0)
-        
-        trainer.fit(synthesizer,
-                    train_dataloaders=train_loader,
-                    val_dataloaders=val_loader)
-        
-        plot_dir = hparam_log_dir + '/plot'
-        Path(plot_dir).mkdir(parents=True, exist_ok=True)
-        
-        metrics = ['loss', 'mse_loss', 'kl_loss']
-        metric_path = hparam_log_dir + '/version_0/metrics.csv'
-        metric_df = pd.read_csv(metric_path, sep=',')
-        
-        hparam_df.loc[hparam_no, 'last_epoch'] = metric_df['epoch'].max()
-        
-        for metric in metrics:
-            print('Plotting', metric)
-            train_metric = 'train_' + metric
-            val_metric = 'val_' + metric
-            print('metric_df', metric_df.columns)
-            train = metric_df.dropna(subset=train_metric).sort_values(by='epoch')
-            val = metric_df.dropna(subset=val_metric).sort_values(by='epoch')
-            
-            train_x = list(train['epoch'])
-            train_y = list(train[train_metric])
-            
-            val_x = list(val['epoch'])
-            val_y = list(val[val_metric])
-            
-            plot_metric(train_x,
-                        val_x,
-                        train_y,
-                        val_y,
-                        'Epoch',
-                        metric,
-                        metric+' across epochs',
-                        plot_dir + '/' + metric + '.png')
-    
-        hparam_df.loc[hparam_no, 'val_mse_loss'] = metric_df['val_mse_loss'].min(skipna=True)
-        
-        best_model = Synthesizer.load_from_checkpoint(trainer.checkpoint_callback.best_model_path)
-        best_model.eval()
-        
-        condition, z, out = best_model.sample_data(train_set.cohort_pct, syn_sample_count)
-        condition = condition.cpu().detach().numpy()
-        samples = ['sample-'+str(i) for i in range(1, condition.shape[0]+1)]
-        condition_df = pd.DataFrame(condition,
-                                   index=samples,
-                                   columns=train_set.cohort_names)
-        condition_df.index.name = 'Sample'
-        condition_df.to_csv('synthetic_condition.tsv', sep='\t', index=True)
-        
-        z = z.cpu().detach().numpy()
-        zdf = pd.DataFrame(z,
-                           index=samples,
-                           columns=['z'+str(i) for i in range(z.shape[1])])
-        zdf.to_csv('z.tsv', sep='\t', index=True)
-        
-        out = out.cpu().detach().numpy()
-        out_df = pd.DataFrame(out,
-                              columns=train_set.feature_names,
-                              index=samples)
-        out_df.index.name = 'Sample'
-
-        out_df.to_csv('synthetic_feature.tsv', sep='\t', index=True)        
-        os.chdir('..')
-        print('\n')
-    hparam_df.to_csv(log_dir + '/hyperparameters.tsv', sep='\t', index=True)
-    best_hparam = hparam_df['val_mse_loss'].idxmin()
-    with open(log_dir + '/best_hparam.txt', 'w') as fp:
-        fp.write(best_hparam)
     
 def main(args):
     Path(args.out_dir).mkdir(parents=True, exist_ok=True)
     os.chdir(args.out_dir)
     
-    log_file = open(args.out_dir + '/train_cvae.log', 'w')
+    log_file = open(args.out_dir + '/preprocess.log', 'w')
     
     original_stdout = sys.stdout
     sys.stdout = log_file
@@ -421,11 +445,13 @@ def main(args):
     original_stderr = sys.stderr
     sys.stderr = log_file
     
+    print('========== preprocess.py ==========')
+    
     print(args)
     
     kwargs = vars(args)
     del kwargs['out_dir']
-    generate_synthetic_data(**kwargs)
+    preprocess(**kwargs)
 
     sys.stdout = original_stdout
     sys.stderr = original_stderr
